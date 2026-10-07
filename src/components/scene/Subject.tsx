@@ -5,9 +5,7 @@ import { interaction } from '@/components/scene/interaction'
 import { registerObject } from '@/components/scene/objectRegistry'
 import { useSceneStore } from '@/store/sceneStore'
 
-const _headWorld = new THREE.Vector3()
 const _cameraWorld = new THREE.Vector3()
-const _opposite = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
 
 export function Subject() {
@@ -57,9 +55,7 @@ function SubjectAnimator({
 
     if (subject.gaze === 'camera') {
       _cameraWorld.set(camera.position[0], camera.position[1], camera.position[2])
-      headObject.getWorldPosition(_headWorld)
-      _opposite.copy(_headWorld).multiplyScalar(2).sub(_cameraWorld)
-      headObject.lookAt(_opposite)
+      headObject.lookAt(_cameraWorld)
     } else {
       headObject.rotation.set(subject.headPitch, subject.headYaw, 0)
     }
