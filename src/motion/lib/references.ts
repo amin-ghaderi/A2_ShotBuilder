@@ -2,18 +2,22 @@ import {
   APPEARANCE_PICTURE_ROLES,
   REF2VA_LIMITS,
   STANDALONE_PICTURE_ROLES,
+  defaultRetentionFor,
   type MotionAssetKind,
   type MotionObject,
   type MotionProject,
   type MotionReference,
   type MotionReferenceRole,
   type MotionShot,
+  type ReferenceModality,
+  type ReferenceSlot,
   type RetentionMarker,
   type AudioRetentionMarker,
   type ShotReferenceBinding,
 } from '@/motion/types'
 
 export type ResolvedTag = {
+  slot: ReferenceSlot
   reference: MotionReference
   kind: MotionAssetKind
   index: number
@@ -22,17 +26,26 @@ export type ResolvedTag = {
 }
 
 export type ManifestEntry = {
+  slotId: string
   assetId: string
+  ownerType: 'object' | 'shot'
+  ownerId: string
+  ownerName: string
   filename: string
   exportFilename: string
   mime: string
   kind: MotionAssetKind
+  modality: ReferenceModality
   role: MotionReferenceRole
   comfyTag: string
   slot: string
   audioFamily: 'none' | 'ref_audios' | 'ref_video_audios'
   loaderClass: 'LoadImage' | 'LoadVideo' | 'LoadAudio'
+  loaderTitle: string
+  loaderNodeId?: number
   pairedVideoSlot?: string
+  mediaAssigned: boolean
+  durationVerified: boolean
   trimStart: number
   trimEnd: number
   dataUrl: string
@@ -62,6 +75,12 @@ export function isAppearancePictureRole(role: MotionReferenceRole) {
   return APPEARANCE_PICTURE_ROLES.includes(role)
 }
 
+export function promptKind(modality: ReferenceModality): MotionAssetKind {
+  if (modality === 'audio') return 'audio'
+  if (modality === 'image') return 'image'
+  return 'video'
+}
+
 export function clipLength(reference: MotionReference) {
   if (reference.kind === 'image') return 0
   const end = reference.trimEnd || reference.duration || 0
@@ -85,32 +104,120 @@ function extensionOf(filename: string, mime: string, kind: MotionAssetKind) {
 }
 
 export function exportFilenameFor(kind: MotionAssetKind, index: number, filename: string, mime: string) {
+  if (!filename && !mime) return ''
   const ext = extensionOf(filename, mime, kind)
   const stem = filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
   const prefix = kind === 'image' ? 'picture' : kind === 'video' ? 'video' : 'audio'
   return `a2-${prefix}-${index}${stem ? `-${stem}` : ''}.${ext}`
 }
 
-/** MiniMaxH3ReferenceToVideo numbers each modality by connection order. */
-export function resolveShotTags(project: MotionProject, shot: MotionShot): ResolvedTag[] {
-  const bound = shot.bindings
-    .map((binding) => {
-      const reference = project.references.find((item) => item.id === binding.referenceId)
-      return reference ? { reference, binding } : null
-    })
-    .filter((item): item is { reference: MotionReference; binding: ShotReferenceBinding } => Boolean(item))
+function slotAsReference(slot: ReferenceSlot, media?: MotionReference): MotionReference {
+  return {
+    id: slot.id,
+    kind: promptKind(slot.modality),
+    name: media?.name || slot.id,
+    filename: media?.filename || '',
+    mime: media?.mime || '',
+    dataUrl: media?.dataUrl || '',
+    role: slot.role,
+    description: slot.description || media?.description || '',
+    duration: media?.duration,
+    trimStart: media?.trimStart ?? 0,
+    trimEnd: media?.trimEnd ?? 0,
+  }
+}
 
+export function migrateBindingsToSlots(project: MotionProject, shot: MotionShot): ReferenceSlot[] {
+  return shot.bindings
+    .map((binding, index) => {
+      const media = project.references.find((item) => item.id === binding.referenceId)
+      if (!media) return null
+      const objectId = binding.objectId
+      const slot: ReferenceSlot = {
+        id: binding.referenceId,
+        ownerType: objectId ? 'object' : 'shot',
+        ownerId: objectId ?? shot.id,
+        modality: media.kind === 'video' ? 'video' : media.kind,
+        role: media.role,
+        retention: binding.retention || defaultRetentionFor(media.role),
+        order: index,
+        description: media.description,
+        useSynchronizedAudio: false,
+        defineAudioLabel: false,
+      }
+      return slot
+    })
+    .filter((item): item is ReferenceSlot => Boolean(item))
+}
+
+export function shotSlots(project: MotionProject, shot: MotionShot): ReferenceSlot[] {
+  const source = shot.referenceSlots?.length ? shot.referenceSlots : migrateBindingsToSlots(project, shot)
+  return [...source].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+}
+
+export function ownerNameForSlot(shot: MotionShot, slot: ReferenceSlot) {
+  if (slot.ownerType === 'object') {
+    return shot.objects.find((item) => item.id === slot.ownerId)?.name ?? 'Object'
+  }
+  if (slot.role === 'camera') return 'Camera motion'
+  if (slot.role === 'environment') return 'Environment'
+  if (slot.role === 'edit-source' || slot.role === 'continuation') return 'Source video'
+  return shot.name
+}
+
+export function loaderTitleFor(shot: MotionShot, slot: ReferenceSlot, tag: string) {
+  const owner = ownerNameForSlot(shot, slot)
+  const label = tag.replace(/[<>]/g, '')
+  return `${shot.name} | ${owner} | ${label} | ${slot.role}`.toUpperCase()
+}
+
+/** MiniMaxH3ReferenceToVideo numbers each modality by per-shot slot order. */
+export function resolveShotTags(project: MotionProject, shot: MotionShot): ResolvedTag[] {
+  const slots = shotSlots(project, shot)
   const counters = { image: 0, video: 0, audio: 0 }
-  return bound.map(({ reference, binding }) => {
-    counters[reference.kind] += 1
-    const index = counters[reference.kind]
-    const tag =
-      reference.kind === 'image' ? pictureTag(index) : reference.kind === 'video' ? videoTag(index) : audioTag(index)
-    return { reference, kind: reference.kind, index, tag, binding }
+  const tags: ResolvedTag[] = []
+  slots.forEach((slot) => {
+    const media = project.references.find((item) => item.id === slot.id)
+    const kind = promptKind(slot.modality)
+    counters[kind] += 1
+    const index = counters[kind]
+    const tag = kind === 'image' ? pictureTag(index) : kind === 'video' ? videoTag(index) : audioTag(index)
+    const binding = shot.bindings.find((item) => item.referenceId === slot.id)
+    tags.push({
+      slot,
+      reference: slotAsReference(slot, media),
+      kind,
+      index,
+      tag,
+      binding: binding ?? {
+        referenceId: slot.id,
+        objectId: slot.ownerType === 'object' ? slot.ownerId : undefined,
+        retention: slot.retention,
+      },
+    })
+    if (slot.defineAudioLabel && kind === 'video') {
+      counters.audio += 1
+      const audioIndex = counters.audio
+      tags.push({
+        slot: { ...slot, modality: 'audio', defineAudioLabel: true },
+        reference: {
+          ...slotAsReference(slot, media),
+          kind: 'audio',
+          role: 'audio',
+        },
+        kind: 'audio',
+        index: audioIndex,
+        tag: audioTag(audioIndex),
+        binding: { referenceId: slot.id, retention: slot.retention },
+      })
+    }
   })
+  return tags
 }
 
 export function objectsForReference(shot: MotionShot, referenceId: string, binding?: ShotReferenceBinding) {
+  const owned = (shot.referenceSlots ?? []).find((slot) => slot.id === referenceId)
+  if (owned?.ownerType === 'object') return shot.objects.filter((object) => object.id === owned.ownerId)
   return shot.objects.filter(
     (object) =>
       object.referenceIds.includes(referenceId) ||
@@ -120,15 +227,16 @@ export function objectsForReference(shot: MotionShot, referenceId: string, bindi
 }
 
 export function retentionFor(tag: ResolvedTag, fallback: RetentionMarker | AudioRetentionMarker) {
-  return tag.binding?.retention ?? fallback
+  return tag.slot.retention || tag.binding?.retention || fallback
 }
 
 export function validateReferenceLimits(project: MotionProject, shot: MotionShot) {
   const tags = resolveShotTags(project, shot)
   const images = tags.filter((item) => item.kind === 'image')
   const videos = tags.filter((item) => item.kind === 'video')
-  const audios = tags.filter((item) => item.kind === 'audio')
+  const audios = tags.filter((item) => item.kind === 'audio' && item.slot.modality === 'audio')
   const problems: string[] = []
+  const warnings: string[] = []
   if (images.length > REF2VA_LIMITS.maxImages) problems.push(`Ref2VA accepts at most ${REF2VA_LIMITS.maxImages} picture references.`)
   if (videos.length > REF2VA_LIMITS.maxVideos) problems.push(`Ref2VA accepts at most ${REF2VA_LIMITS.maxVideos} video references.`)
   if (audios.length > REF2VA_LIMITS.maxAudios) problems.push(`Ref2VA accepts at most ${REF2VA_LIMITS.maxAudios} standalone audio references.`)
@@ -143,53 +251,82 @@ export function validateReferenceLimits(project: MotionProject, shot: MotionShot
     problems.push(`Single-shot Ref2VA duration must stay between ${REF2VA_LIMITS.minDuration}s and ${REF2VA_LIMITS.maxDuration}s.`)
   }
   let videoTotal = 0
+  let verifiedVideo = 0
   videos.forEach((item) => {
     const length = clipLength(item.reference) || item.reference.duration || 0
-    if (length > 0 && (length < REF2VA_LIMITS.minClipDuration || length > REF2VA_LIMITS.maxClipDuration)) {
-      problems.push(`${item.tag} clip length must stay between ${REF2VA_LIMITS.minClipDuration}s and ${REF2VA_LIMITS.maxClipDuration}s.`)
+    if (length > 0) {
+      verifiedVideo += 1
+      if (length < REF2VA_LIMITS.minClipDuration || length > REF2VA_LIMITS.maxClipDuration) {
+        problems.push(`${item.tag} clip length must stay between ${REF2VA_LIMITS.minClipDuration}s and ${REF2VA_LIMITS.maxClipDuration}s.`)
+      }
+      videoTotal += length
+    } else {
+      warnings.push(`${item.tag} file duration is unverified until the media is selected in ComfyUI (required ${REF2VA_LIMITS.minClipDuration}–${REF2VA_LIMITS.maxClipDuration}s, combined videos ≤ ${REF2VA_LIMITS.maxClipDuration}s).`)
     }
-    videoTotal += length || 0
   })
-  if (videoTotal > REF2VA_LIMITS.maxClipDuration) {
+  if (verifiedVideo > 0 && videoTotal > REF2VA_LIMITS.maxClipDuration) {
     problems.push(`Combined reference-video duration must not exceed ${REF2VA_LIMITS.maxClipDuration}s.`)
   }
   let audioTotal = 0
   audios.forEach((item) => {
     const length = clipLength(item.reference) || item.reference.duration || 0
-    if (length > 0 && (length < REF2VA_LIMITS.minClipDuration || length > REF2VA_LIMITS.maxClipDuration)) {
-      problems.push(`${item.tag} clip length must stay between ${REF2VA_LIMITS.minClipDuration}s and ${REF2VA_LIMITS.maxClipDuration}s.`)
+    if (length > 0) {
+      if (length < REF2VA_LIMITS.minClipDuration || length > REF2VA_LIMITS.maxClipDuration) {
+        problems.push(`${item.tag} clip length must stay between ${REF2VA_LIMITS.minClipDuration}s and ${REF2VA_LIMITS.maxClipDuration}s.`)
+      }
+      audioTotal += length
+    } else {
+      warnings.push(`${item.tag} file duration is unverified until the media is selected in ComfyUI (required ${REF2VA_LIMITS.minClipDuration}–${REF2VA_LIMITS.maxClipDuration}s, combined audio ≤ ${REF2VA_LIMITS.maxClipDuration}s).`)
     }
-    audioTotal += length || 0
   })
   if (audioTotal > REF2VA_LIMITS.maxClipDuration) {
     problems.push(`Combined standalone-audio duration must not exceed ${REF2VA_LIMITS.maxClipDuration}s.`)
   }
-  tags.forEach((item) => {
-    if (!item.reference.dataUrl) problems.push(`${item.tag} (${item.reference.filename}) has no packed media data. Re-upload the file.`)
-  })
-  return { images: images.length, videos: videos.length, audios: audios.length, mixed, problems, ok: problems.length === 0 }
+  return {
+    images: images.length,
+    videos: videos.length,
+    audios: audios.length,
+    mixed,
+    problems,
+    warnings,
+    ok: problems.length === 0,
+  }
 }
 
 export function manifestForShot(project: MotionProject, shot: MotionShot): ManifestEntry[] {
-  const tags = resolveShotTags(project, shot)
+  const tags = resolveShotTags(project, shot).filter((item) => item.slot.modality !== 'audio' || item.kind === 'audio')
   const used = new Set<string>()
   const entries: ManifestEntry[] = []
   tags.forEach((item) => {
-    let name = exportFilenameFor(item.kind, item.index, item.reference.filename, item.reference.mime)
-    while (used.has(name)) name = name.replace(/(\.\w+)$/, `-${item.reference.id.slice(-4)}$1`)
-    used.add(name)
+    if (item.kind === 'audio' && item.slot.modality !== 'audio') return
+    const assigned = Boolean(item.reference.dataUrl || item.reference.filename)
+    let name = assigned ? exportFilenameFor(item.kind, item.index, item.reference.filename, item.reference.mime) : ''
+    if (name) {
+      while (used.has(name)) name = name.replace(/(\.\w+)$/, `-${item.slot.id.slice(-4)}$1`)
+      used.add(name)
+    }
+    const title = loaderTitleFor(shot, item.slot, item.tag)
+    const owner = ownerNameForSlot(shot, item.slot)
     if (item.kind === 'image') {
       entries.push({
-        assetId: item.reference.id,
+        slotId: item.slot.id,
+        assetId: item.slot.id,
+        ownerType: item.slot.ownerType,
+        ownerId: item.slot.ownerId,
+        ownerName: owner,
         filename: item.reference.filename,
         exportFilename: name,
         mime: item.reference.mime,
         kind: 'image',
-        role: item.reference.role,
+        modality: 'image',
+        role: item.slot.role,
         comfyTag: item.tag,
         slot: `ref_images.ref_image_${item.index - 1}`,
         audioFamily: 'none',
         loaderClass: 'LoadImage',
+        loaderTitle: title,
+        mediaAssigned: assigned,
+        durationVerified: true,
         trimStart: item.reference.trimStart,
         trimEnd: item.reference.trimEnd,
         dataUrl: item.reference.dataUrl,
@@ -197,18 +334,27 @@ export function manifestForShot(project: MotionProject, shot: MotionShot): Manif
       return
     }
     if (item.kind === 'video') {
+      const synced = item.slot.modality === 'video_with_audio' || item.slot.useSynchronizedAudio
       entries.push({
-        assetId: item.reference.id,
+        slotId: item.slot.id,
+        assetId: item.slot.id,
+        ownerType: item.slot.ownerType,
+        ownerId: item.slot.ownerId,
+        ownerName: owner,
         filename: item.reference.filename,
         exportFilename: name,
         mime: item.reference.mime,
         kind: 'video',
-        role: item.reference.role,
+        modality: item.slot.modality,
+        role: item.slot.role,
         comfyTag: item.tag,
         slot: `ref_videos.ref_video_${item.index - 1}`,
-        audioFamily: 'ref_video_audios',
+        audioFamily: synced ? 'ref_video_audios' : 'none',
         loaderClass: 'LoadVideo',
-        pairedVideoSlot: `ref_video_audios.ref_video_audio_${item.index - 1}`,
+        loaderTitle: title,
+        pairedVideoSlot: synced ? `ref_video_audios.ref_video_audio_${item.index - 1}` : undefined,
+        mediaAssigned: assigned,
+        durationVerified: Boolean(item.reference.duration || item.reference.trimEnd),
         trimStart: item.reference.trimStart,
         trimEnd: item.reference.trimEnd,
         dataUrl: item.reference.dataUrl,
@@ -216,16 +362,24 @@ export function manifestForShot(project: MotionProject, shot: MotionShot): Manif
       return
     }
     entries.push({
-      assetId: item.reference.id,
+      slotId: item.slot.id,
+      assetId: item.slot.id,
+      ownerType: item.slot.ownerType,
+      ownerId: item.slot.ownerId,
+      ownerName: owner,
       filename: item.reference.filename,
       exportFilename: name,
       mime: item.reference.mime,
       kind: 'audio',
-      role: item.reference.role,
+      modality: 'audio',
+      role: item.slot.role,
       comfyTag: item.tag,
       slot: `ref_audios.ref_audio_${item.index - 1}`,
       audioFamily: 'ref_audios',
       loaderClass: 'LoadAudio',
+      loaderTitle: title,
+      mediaAssigned: assigned,
+      durationVerified: Boolean(item.reference.duration || item.reference.trimEnd),
       trimStart: item.reference.trimStart,
       trimEnd: item.reference.trimEnd,
       dataUrl: item.reference.dataUrl,
@@ -250,22 +404,19 @@ export function collectPromptSubjects(project: MotionProject, shot: MotionShot, 
   const subjects: PromptSubject[] = []
 
   const takePictures = (predicate: (tag: ResolvedTag) => boolean) => {
-    const matched = imageTags.filter((tag) => !claimed.has(tag.reference.id) && predicate(tag))
-    matched.forEach((tag) => claimed.add(tag.reference.id))
+    const matched = imageTags.filter((tag) => !claimed.has(tag.slot.id) && predicate(tag))
+    matched.forEach((tag) => claimed.add(tag.slot.id))
     return matched
   }
 
   shot.objects.forEach((object) => {
     const pictures = takePictures((tag) => {
-      if (isStandalonePictureRole(tag.reference.role)) return false
-      const attached = objectsForReference(shot, tag.reference.id, tag.binding)
-      if (attached.some((item) => item.id === object.id)) return true
-      if (tag.binding?.subjectId && (object.subjectId === tag.binding.subjectId || project.subjects.some((subject) => subject.id === tag.binding?.subjectId && (subject.kind === object.kind || (object.kind === 'person' && subject.kind === 'person'))))) {
-        return attached.length === 0 || attached.some((item) => item.id === object.id)
-      }
-      return false
+      if (isStandalonePictureRole(tag.slot.role)) return false
+      if (tag.slot.ownerType === 'object') return tag.slot.ownerId === object.id
+      const attached = objectsForReference(shot, tag.slot.id, tag.binding)
+      return attached.some((item) => item.id === object.id)
     })
-    const registry = project.subjects.find((subject) => subject.id === object.subjectId || (object.kind === 'person' && subject.kind === 'person' && pictures.length > 0))
+    const registry = project.subjects.find((subject) => subject.id === object.subjectId)
     const noun =
       object.kind === 'person'
         ? 'the person'
@@ -290,15 +441,7 @@ export function collectPromptSubjects(project: MotionProject, shot: MotionShot, 
     })
   })
 
-  const personSubject = subjects.find((item) => item.kind === 'person' && item.pictureTags.length === 0)
-  if (personSubject) {
-    takePictures((tag) => tag.reference.role === 'identity' || tag.reference.role === 'appearance').forEach((tag) => {
-      personSubject.pictureTags.push(tag.tag)
-      personSubject.retention = retentionFor(tag, 'fully_preserved') as RetentionMarker
-    })
-  }
-
-  takePictures((tag) => tag.reference.role === 'environment').forEach((tag) => {
+  takePictures((tag) => tag.slot.role === 'environment' && tag.slot.ownerType === 'shot').forEach((tag) => {
     const n = subjects.length + 1
     subjects.push({
       n,
@@ -310,7 +453,7 @@ export function collectPromptSubjects(project: MotionProject, shot: MotionShot, 
     })
   })
 
-  takePictures((tag) => isAppearancePictureRole(tag.reference.role) && tag.reference.role !== 'environment').forEach((tag) => {
+  takePictures((tag) => isAppearancePictureRole(tag.slot.role) && tag.slot.role !== 'environment' && tag.slot.ownerType === 'shot').forEach((tag) => {
     const n = subjects.length + 1
     subjects.push({
       n,
@@ -338,4 +481,8 @@ export function promptLabels(text: string) {
     videos: gather('Video'),
     audios: gather('Audio'),
   }
+}
+
+export function slotsForOwner(shot: MotionShot, ownerType: 'object' | 'shot', ownerId: string) {
+  return (shot.referenceSlots ?? []).filter((slot) => slot.ownerType === ownerType && slot.ownerId === ownerId).sort((a, b) => a.order - b.order)
 }

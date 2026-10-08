@@ -1,8 +1,39 @@
 import { snapshotProject } from '@/motion/lib/projectSnapshot'
 import { compileRef2VAPrompt } from '@/motion/lib/promptCompiler'
-import { bindSingleShotWorkflow } from '@/motion/lib/workflow'
+import { bindSingleShotWorkflow, type WorkflowExportResult } from '@/motion/lib/workflow'
 import { buildZip, dataUrlToBytes, textBytes, type ZipEntry } from '@/motion/lib/zip'
 import type { MotionProject, MotionShot } from '@/motion/types'
+
+type BoundWorkflow = Extract<WorkflowExportResult, { ok: true }>
+
+export function buildSlotManifest(shot: MotionShot, bound: BoundWorkflow) {
+  return {
+    shot: shot.id,
+    shotName: shot.name,
+    target: 'MiniMax-H3-Ref2VA',
+    status: bound.manifest.every((item) => item.mediaAssigned) ? 'media_present' : 'awaiting_media',
+    readiness: bound.readiness,
+    executionReady: bound.executionReady,
+    executed: bound.executed,
+    slots: bound.manifest.map((item) => ({
+      slotId: item.slotId,
+      owner: item.ownerName,
+      ownerType: item.ownerType,
+      ownerId: item.ownerId,
+      type: item.kind,
+      modality: item.modality,
+      role: item.role,
+      promptLabel: item.comfyTag,
+      comfyInput: item.slot,
+      audioFamily: item.audioFamily,
+      loaderClass: item.loaderClass,
+      loaderTitle: item.loaderTitle,
+      loaderNodeId: item.loaderNodeId,
+      mediaAssigned: item.mediaAssigned,
+      durationVerified: item.durationVerified,
+    })),
+  }
+}
 
 export type ExportPackageResult =
   | {
@@ -13,44 +44,37 @@ export type ExportPackageResult =
       prompt: string
       diagnostics: string[]
       executed: false
+      executionReady: false
+      readiness: 'template'
     }
   | { ok: false; reason: string; diagnostics: string[] }
 
-const README = `A2 MotionBuilder — MiniMax H3 Ref2VA single-shot package
+const README = `A2 MotionBuilder — MiniMax H3 Ref2VA template
 
-This archive is a structurally assembled ComfyUI graph. It is not a completed MiniMax render and has not been queued for inference.
+Status: TEMPLATE READY. Not execution-ready. MiniMax inference has not been run.
+
+This archive is a structurally assembled ComfyUI graph. Loader nodes are titled by shot, owner, prompt label, and role. Select the actual media in those loaders inside ComfyUI.
 
 Contents
 - workflow.json          ComfyUI editor graph
-- workflow.api.json      ComfyUI API /prompt format
+- workflow.api.json      API /prompt format (not runnable until media are assigned)
 - prompt-ref2va.txt      Official six-section Ref2VA prompt
-- manifest.json          Prompt labels ↔ loader filenames ↔ node slots
-- project.json           Full A2 motion project
-- shot.json              Active shot plus bound references
-- validation.json        Fail-closed checks used for this export
-- media/                 Reference files named exactly as the LoadImage / LoadVideo / LoadAudio widgets
+- manifest.json          Slot IDs ↔ prompt labels ↔ loader nodes
+- project.json           A2 motion project
+- shot.json              Active shot
+- validation.json        Template-ready report
 
-Before running in ComfyUI
-1. Copy every file in media/ into your ComfyUI input directory, or upload each file through the corresponding node's upload widget.
-2. A browser download does not install those files into ComfyUI.
-3. Open workflow.json (File → Open). Confirm widget filenames match manifest.json.
-4. Queue the prompt only after the media files are visible to that ComfyUI instance.
+How to run
+1. Open workflow.json in ComfyUI (File → Open).
+2. On each titled LoadImage / LoadVideo / LoadAudio node, choose the real file.
+3. Validate, then queue.
 
-LoadVideo, GetVideoComponents, and LoadAudio are official comfy-core classes. If your ComfyUI build lacks them, this graph cannot run — do not invent substitute nodes.
+A2 does not store or install reference files. A browser download does not copy media into ComfyUI.
 `
 
 export function buildSingleShotPackage(project: MotionProject, shot: MotionShot, template?: unknown): ExportPackageResult {
   const bound = bindSingleShotWorkflow(project, shot, template)
   if (!bound.ok) return { ok: false, reason: bound.reason, diagnostics: bound.diagnostics }
-
-  const missingMedia = bound.manifest.filter((item) => !item.dataUrl)
-  if (missingMedia.length) {
-    return {
-      ok: false,
-      reason: `${missingMedia[0].comfyTag} has no packed media bytes. Re-upload the file before export.`,
-      diagnostics: missingMedia.map((item) => item.comfyTag),
-    }
-  }
 
   const files: ZipEntry[] = []
   const push = (path: string, data: Uint8Array) => files.push({ path, data })
@@ -60,40 +84,13 @@ export function buildSingleShotPackage(project: MotionProject, shot: MotionShot,
   push(
     'manifest.json',
     textBytes(
-      JSON.stringify(
-        bound.manifest.map((item) => ({
-          assetId: item.assetId,
-          filename: item.filename,
-          exportFilename: item.exportFilename,
-          mime: item.mime,
-          kind: item.kind,
-          role: item.role,
-          comfyTag: item.comfyTag,
-          slot: item.slot,
-          audioFamily: item.audioFamily,
-          loaderClass: item.loaderClass,
-          pairedVideoSlot: item.pairedVideoSlot,
-          trimStart: item.trimStart,
-          trimEnd: item.trimEnd,
-        })),
-        null,
-        2,
-      ),
+      JSON.stringify(buildSlotManifest(shot, bound), null, 2),
     ),
   )
   push('project.json', textBytes(JSON.stringify(snapshotProject(project), null, 2)))
   push(
     'shot.json',
-    textBytes(
-      JSON.stringify(
-        {
-          shot: { ...shot, compiledPrompt: compileRef2VAPrompt(project, shot) },
-          references: project.references.filter((item) => shot.bindings.some((binding) => binding.referenceId === item.id)),
-        },
-        null,
-        2,
-      ),
-    ),
+    textBytes(JSON.stringify({ shot: { ...shot, compiledPrompt: compileRef2VAPrompt(project, shot) } }, null, 2)),
   )
   push(
     'validation.json',
@@ -101,19 +98,12 @@ export function buildSingleShotPackage(project: MotionProject, shot: MotionShot,
       JSON.stringify(
         {
           ok: true,
+          readiness: 'template',
+          executionReady: false,
           executed: false,
-          readyLabel: 'structurally-validated',
           durationSeconds: shot.duration,
-          h3FrameLengthNote: 'length is computed in-graph by the official ComfyMathExpression using Python modulo.',
-          media: bound.manifest.map((item) => ({
-            tag: item.comfyTag,
-            slot: item.slot,
-            audioFamily: item.audioFamily,
-            loaderClass: item.loaderClass,
-            exportFilename: item.exportFilename,
-            packagePath: `media/${item.exportFilename}`,
-          })),
           diagnostics: bound.diagnostics,
+          warnings: bound.warnings,
         },
         null,
         2,
@@ -122,10 +112,10 @@ export function buildSingleShotPackage(project: MotionProject, shot: MotionShot,
   )
   push('README.txt', textBytes(README))
   bound.manifest.forEach((item) => {
-    push(`media/${item.exportFilename}`, dataUrlToBytes(item.dataUrl))
+    if (item.dataUrl && item.exportFilename) push(`media/${item.exportFilename}`, dataUrlToBytes(item.dataUrl))
   })
 
-  const mediaNames = bound.manifest.map((item) => item.exportFilename)
+  const mediaNames = bound.manifest.filter((item) => item.mediaAssigned).map((item) => item.exportFilename)
   const loaderNames = (bound.editor.nodes ?? [])
     .filter((node) => node.type === 'LoadImage' || node.type === 'LoadVideo' || node.type === 'LoadAudio')
     .map((node) => {
@@ -150,5 +140,7 @@ export function buildSingleShotPackage(project: MotionProject, shot: MotionShot,
     prompt: bound.prompt,
     diagnostics: bound.diagnostics,
     executed: false,
+    executionReady: false,
+    readiness: 'template',
   }
 }

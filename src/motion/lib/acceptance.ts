@@ -12,7 +12,9 @@ import {
   resolveShotTags,
   validateReferenceLimits,
 } from '@/motion/lib/references'
+import { compilePrompt } from '@/lib/prompt/promptCompiler'
 import { parseMotionProject } from '@/motion/lib/schema'
+import { useSceneStore } from '@/store/sceneStore'
 import officialTemplate from '@/motion/templates/video_minimax_h3_r2v.json'
 import {
   bindSingleShotWorkflow,
@@ -24,7 +26,7 @@ import {
   VERIFIED_LOADER_TYPES,
   compileMasterWorkflow,
 } from '@/motion/lib/workflow'
-import { H3_FRAME_EXPRESSION, TEMPLATE_EXAMPLE_IMAGES, type MotionProject, type MotionReference, type MotionReferenceRole, type RetentionMarker } from '@/motion/types'
+import { H3_FRAME_EXPRESSION, TEMPLATE_EXAMPLE_IMAGES, type MotionProject, type MotionReference, type MotionReferenceRole, type ReferenceSlot, type RetentionMarker } from '@/motion/types'
 import { useMotionStore } from '@/store/motionStore'
 
 export type CheckResult = { name: string; ok: boolean; detail?: string }
@@ -86,6 +88,18 @@ function generationApi(api: Record<string, { class_type: string; inputs: Record<
   return Object.values(api).find((node) => node.class_type === 'MiniMaxH3ReferenceToVideo')
 }
 
+function addSlot(target: MotionProject, partial: Partial<ReferenceSlot> & Pick<ReferenceSlot, 'id' | 'ownerType' | 'ownerId' | 'modality' | 'role'>) {
+  const shot = target.shots[0]
+  shot.referenceSlots.push({
+    retention: 'fully_preserved',
+    order: shot.referenceSlots.length,
+    description: '',
+    useSynchronizedAudio: partial.modality === 'video_with_audio',
+    defineAudioLabel: false,
+    ...partial,
+  })
+}
+
 export function runAcceptanceChecks(): { ok: boolean; results: CheckResult[] } {
   const results: CheckResult[] = []
 
@@ -120,7 +134,7 @@ export function runAcceptanceChecks(): { ok: boolean; results: CheckResult[] } {
     const duration = emptyBound.editor.nodes?.find((node) => node.type === 'PrimitiveFloat' && node.title === 'Float (Duration)')
     results.push(check('Duration primitive is Float (Duration)', ((duration?.widgets_values_named ?? {}) as { value?: number }).value === shot.duration, String((duration?.widgets_values_named as { value?: number } | undefined)?.value)))
     results.push(check('API format keeps generation node', Object.values(emptyBound.api).some((node) => node.class_type === 'MiniMaxH3ReferenceToVideo')))
-    results.push(check('Export is not claimed executed', emptyBound.executed === false))
+    results.push(check('Export is not claimed executed', emptyBound.executed === false && emptyBound.executionReady === false))
     const originalTypes = new Set(((officialTemplate as { nodes?: Array<{ type?: string }> }).nodes ?? []).map((node) => String(node.type)))
     VERIFIED_LOADER_TYPES.forEach((type) => originalTypes.add(type))
     const invented = (emptyBound.editor.nodes ?? []).map((node) => String(node.type)).filter((type) => type && !originalTypes.has(type))
@@ -223,9 +237,18 @@ export function runAcceptanceChecks(): { ok: boolean; results: CheckResult[] } {
   results.push(check('8. Video reference connects', videoBound.ok, videoBound.ok ? undefined : videoBound.reason))
   if (videoBound.ok) {
     results.push(check('8. LoadVideo + GetVideoComponents feed ref_videos', connectedOriginType(videoBound.editor, 'ref_videos.ref_video_0') === 'GetVideoComponents' && connectedFilename(videoBound.editor, 'ref_videos.ref_video_0') === videoBound.manifest[0].exportFilename))
-    results.push(check('10. Video soundtrack uses ref_video_audios', connectedOriginType(videoBound.editor, 'ref_video_audios.ref_video_audio_0') === 'GetVideoComponents' && Boolean(generationApi(videoBound.api)?.inputs['ref_video_audios.ref_video_audio_0'])))
+    results.push(check('10. Plain video does not connect ref_video_audios', !generationApi(videoBound.api)?.inputs['ref_video_audios.ref_video_audio_0']))
     results.push(check('10. Video soundtrack is not dumped onto ref_audios', !generationApi(videoBound.api)?.inputs['ref_audios.ref_audio_0']))
     results.push(check('8. Prompt Video label does not invent a matching Audio label', videoBound.prompt.includes('<Video 1>') && !videoBound.prompt.includes('<Audio 1>')))
+  }
+
+  const synced = project()
+  addSlot(synced, { id: 'slot-sync', ownerType: 'shot', ownerId: synced.shots[0].id, modality: 'video_with_audio', role: 'camera' })
+  const syncedBound = bindSingleShotWorkflow(synced, synced.shots[0])
+  results.push(check('8. Video-with-audio template export succeeds without a file', syncedBound.ok, syncedBound.ok ? undefined : syncedBound.reason))
+  if (syncedBound.ok) {
+    results.push(check('10. Video-with-audio uses ref_video_audios', connectedOriginType(syncedBound.editor, 'ref_video_audios.ref_video_audio_0') === 'GetVideoComponents'))
+    results.push(check('9. Unused video soundtrack does not invent Audio labels', syncedBound.prompt.includes('<Video 1>') && !syncedBound.prompt.includes('<Audio 1>')))
   }
 
   const audio = project()
@@ -426,6 +449,80 @@ export function runAcceptanceChecks(): { ok: boolean; results: CheckResult[] } {
       boundDuration.ok ? String((durationNode?.widgets_values_named as { value?: number } | undefined)?.value) : boundDuration.reason,
     ),
   )
+
+  useMotionStore.getState().resetProject()
+  useMotionStore.getState().setDuration(6)
+  const leadId = useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)?.objects.find((item) => item.kind === 'person')?.id
+  results.push(check('1. Slot can be created without media', Boolean(leadId && useMotionStore.getState().addReferenceSlot({ ownerType: 'object', ownerId: leadId, modality: 'image', role: 'identity' }))))
+  useMotionStore.getState().addObject('car')
+  const vehicleId = useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)?.objects.find((item) => item.kind === 'car')?.id
+  const afterPerson = useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)
+  results.push(check('2. Person has its own image slot', Boolean(afterPerson?.referenceSlots.some((slot) => slot.ownerId === leadId && slot.modality === 'image'))))
+  results.push(check('3. Car initially has no Person references', Boolean(vehicleId && afterPerson && !afterPerson.referenceSlots.some((slot) => slot.ownerId === vehicleId))))
+  useMotionStore.getState().addReferenceSlot({ ownerType: 'object', ownerId: vehicleId!, modality: 'image', role: 'appearance' })
+  useMotionStore.getState().addReferenceSlot({ ownerType: 'shot', ownerId: useMotionStore.getState().activeShotId, modality: 'video', role: 'camera' })
+  const scenario = snapshotProject(useMotionStore.getState())
+  const scenarioShot = scenario.shots.find((item) => item.id === scenario.activeShotId)!
+  const personSlots = scenarioShot.referenceSlots.filter((slot) => slot.ownerId === leadId)
+  const carSlots = scenarioShot.referenceSlots.filter((slot) => slot.ownerId === vehicleId)
+  results.push(check('4. Car receives a separate image slot', carSlots.length === 1 && carSlots[0].role === 'appearance'))
+  results.push(check('5. Returning to Person preserves its slot', personSlots.length === 1 && personSlots[0].role === 'identity'))
+  useMotionStore.getState().addReferenceSlot({ ownerType: 'object', ownerId: leadId!, modality: 'video', role: 'motion' })
+  results.push(check('6. Same object supports multiple slots', useMotionStore.getState().shots[0].referenceSlots.filter((slot) => slot.ownerId === leadId).length === 2))
+  const boundScenario = bindSingleShotWorkflow(snapshotProject(useMotionStore.getState()), useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)!)
+  results.push(check('13. Empty-media template is TEMPLATE READY', boundScenario.ok && boundScenario.readiness === 'template' && boundScenario.executionReady === false, boundScenario.ok ? undefined : boundScenario.reason))
+  if (boundScenario.ok) {
+    results.push(check('7. Images use ref_images', connectedOriginType(boundScenario.editor, 'ref_images.ref_image_0') === 'LoadImage' && connectedOriginType(boundScenario.editor, 'ref_images.ref_image_1') === 'LoadImage'))
+    results.push(check('7. Videos use ref_videos', connectedOriginType(boundScenario.editor, 'ref_videos.ref_video_0') === 'GetVideoComponents' && connectedOriginType(boundScenario.editor, 'ref_videos.ref_video_1') === 'GetVideoComponents'))
+    results.push(check('10. Prompt labels match graph connections', boundScenario.prompt.includes('<Picture 1>') && boundScenario.prompt.includes('<Picture 2>') && boundScenario.prompt.includes('<Video 1>') && boundScenario.manifest.every((item) => Boolean(generationApi(boundScenario.api)?.inputs[item.slot]))))
+    results.push(check('14. Execution readiness is not claimed', boundScenario.executionReady === false && boundScenario.executed === false))
+    results.push(check('15. Sample images are gone', exampleImagesStillConnected(boundScenario.editor).length === 0))
+    results.push(check('16. Graph integrity', graphIntegrity(boundScenario.editor).ok, graphIntegrity(boundScenario.editor).problems.join(' ')))
+    const titles = (boundScenario.editor.nodes ?? []).map((node) => String(node.title ?? ''))
+    results.push(check('Loader titles name the owner and label', titles.some((title) => title.includes('PICTURE 1') && title.includes('IDENTITY')) && titles.some((title) => title.includes('VIDEO'))))
+    results.push(check('19. Unknown file durations are unverified', boundScenario.warnings.some((item) => item.includes('unverified')) || boundScenario.diagnostics.some((item) => item.includes('unverified') || item.includes('Select the actual media'))))
+  }
+  const personSlotId = useMotionStore.getState().shots[0].referenceSlots.find((slot) => slot.ownerId === leadId && slot.modality === 'image')?.id
+  const beforeOrder = resolveShotTags(snapshotProject(useMotionStore.getState()), useMotionStore.getState().shots[0]).filter((item) => item.kind === 'image').map((item) => item.slot.ownerId)
+  if (personSlotId) useMotionStore.getState().reorderReferenceSlot(personSlotId, 1)
+  const afterOrder = resolveShotTags(snapshotProject(useMotionStore.getState()), useMotionStore.getState().shots[0]).filter((item) => item.kind === 'image').map((item) => item.slot.ownerId)
+  results.push(check('11. Slot reordering changes Picture mapping', beforeOrder[0] !== afterOrder[0] || beforeOrder.join() !== afterOrder.join(), `${beforeOrder.join(',')} → ${afterOrder.join(',')}`))
+  const toRemove = useMotionStore.getState().shots[0].referenceSlots.find((slot) => slot.modality === 'video' && slot.ownerType === 'shot')?.id
+  if (toRemove) useMotionStore.getState().removeReferenceSlot(toRemove)
+  const afterRemove = compileRef2VAPrompt(snapshotProject(useMotionStore.getState()), useMotionStore.getState().shots[0])
+  const afterRemoveBound = bindSingleShotWorkflow(snapshotProject(useMotionStore.getState()), useMotionStore.getState().shots[0])
+  results.push(check('12. Removing a slot drops stale labels', !afterRemove.includes('<Video 2>') && afterRemoveBound.ok && !generationApi(afterRemoveBound.ok ? afterRemoveBound.api : {})?.inputs['ref_videos.ref_video_1']))
+
+  const saved = useMotionStore.getState().serialized()
+  useMotionStore.getState().resetProject()
+  const slotLoad = useMotionStore.getState().importProject(JSON.parse(JSON.stringify(saved)))
+  results.push(check('20. Save/load retains slot associations', slotLoad === null && useMotionStore.getState().shots[0].referenceSlots.length >= 3))
+  const dupId = useMotionStore.getState().activeShotId
+  useMotionStore.getState().duplicateShot(dupId)
+  const originalSlots = useMotionStore.getState().shots.find((item) => item.id === dupId)?.referenceSlots ?? []
+  const copySlots = useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)?.referenceSlots ?? []
+  results.push(check('21. Shot duplication copies slots without sharing IDs', copySlots.length === originalSlots.length && copySlots.every((slot) => !originalSlots.some((item) => item.id === slot.id))))
+
+  const slotPack = buildSingleShotPackage(scenario, scenarioShot)
+  results.push(check('13. Template ZIP does not require media', slotPack.ok && slotPack.readiness === 'template' && !slotPack.filenames.some((name) => name.startsWith('media/')), slotPack.ok ? slotPack.filenames.join(',') : slotPack.reason))
+
+  const audioSlots = project()
+  addSlot(audioSlots, { id: 'slot-face', ownerType: 'object', ownerId: audioSlots.shots[0].objects[0].id, modality: 'image', role: 'identity' })
+  addSlot(audioSlots, { id: 'slot-voice', ownerType: 'shot', ownerId: audioSlots.shots[0].id, modality: 'audio', role: 'voice' })
+  const audioBound = bindSingleShotWorkflow(audioSlots, audioSlots.shots[0])
+  results.push(check('7. Audio uses ref_audios', audioBound.ok && connectedOriginType(audioBound.ok ? audioBound.editor : {}, 'ref_audios.ref_audio_0') === 'LoadAudio', audioBound.ok ? undefined : audioBound.reason))
+  if (audioBound.ok) {
+    results.push(check('8. Audio label stays independent of pictures', audioBound.prompt.includes('<Audio 1>') && audioBound.prompt.includes('<Picture 1>') && audioBound.manifest.some((item) => item.slot === 'ref_audios.ref_audio_0')))
+  }
+
+  const tenSlots = project()
+  for (let index = 0; index < 10; index += 1) {
+    addSlot(tenSlots, { id: `slot-limit-${index}`, ownerType: 'shot', ownerId: tenSlots.shots[0].id, modality: 'image', role: 'composition' })
+  }
+  results.push(check('18. Slot-count limits are enforced', !validateReferenceLimits(tenSlots, tenSlots.shots[0]).ok && !bindSingleShotWorkflow(tenSlots, tenSlots.shots[0]).ok))
+
+  const stillPrompt = compilePrompt(useSceneStore.getState())
+  results.push(check('22. Still workspace prompt is unchanged', stillPrompt.includes('Use the uploaded photograph as the absolute visual and identity reference') && stillPrompt.includes('Preserve the exact identity')))
 
   return { ok: results.every((item) => item.ok), results }
 }

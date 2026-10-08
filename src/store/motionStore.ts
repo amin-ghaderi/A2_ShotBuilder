@@ -11,14 +11,17 @@ import type {
   MotionObjectKind,
   MotionProject,
   MotionReference,
+  MotionReferenceRole,
   MotionSelection,
   MotionShot,
   MotionSourceMode,
+  ReferenceModality,
+  ReferenceSlot,
   ShotReferenceBinding,
   TransformMode,
   WorkflowBindingMeta,
 } from '@/motion/types'
-import { REF2VA_LIMITS } from '@/motion/types'
+import { REF2VA_LIMITS, defaultRetentionFor, defaultRoleFor, rolesForModality } from '@/motion/types'
 import type { AspectRatio, Vec3 } from '@/types/scene'
 import { create } from 'zustand'
 
@@ -55,6 +58,10 @@ type MotionStore = MotionProject & {
   removeReference: (id: string) => void
   bindReference: (binding: ShotReferenceBinding) => void
   unbindReference: (referenceId: string) => void
+  addReferenceSlot: (input: { ownerType: 'object' | 'shot'; ownerId: string; modality: ReferenceModality; role?: MotionReferenceRole }) => string | null
+  updateReferenceSlot: (id: string, patch: Partial<ReferenceSlot>) => void
+  removeReferenceSlot: (id: string) => void
+  reorderReferenceSlot: (id: string, direction: -1 | 1) => void
   setWorkflow: (workflow: WorkflowBindingMeta) => void
   setImportedVideo: (referenceId: string) => void
   setImportedTrim: (trimStart: number, trimEnd: number) => void
@@ -154,7 +161,11 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
 
   removeObject: (id) =>
     set((state) => ({
-      ...patchShot(state, (shot) => ({ ...shot, objects: shot.objects.filter((item) => item.id !== id) })),
+      ...patchShot(state, (shot) => ({
+        ...shot,
+        objects: shot.objects.filter((item) => item.id !== id),
+        referenceSlots: (shot.referenceSlots ?? []).filter((slot) => !(slot.ownerType === 'object' && slot.ownerId === id)),
+      })),
       selection: state.selection.kind === 'object' && state.selection.id === id ? { kind: 'none' } : state.selection,
     })),
 
@@ -301,11 +312,18 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
     set((state) => {
       const source = state.shots.find((shot) => shot.id === id)
       if (!source) return state
+      const copyId = uid('shot')
+      const cloned = structuredClone(source)
       const copy: MotionShot = {
-        ...structuredClone(source),
-        id: uid('shot'),
+        ...cloned,
+        id: copyId,
         name: `${source.name} copy`,
         playing: false,
+        referenceSlots: (cloned.referenceSlots ?? []).map((slot) => ({
+          ...slot,
+          id: uid('slot'),
+          ownerId: slot.ownerType === 'shot' ? copyId : slot.ownerId,
+        })),
       }
       return { shots: [...state.shots, copy], activeShotId: copy.id }
     }),
@@ -407,6 +425,79 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
           referenceIds: object.referenceIds.filter((id) => id !== referenceId),
         })),
       })),
+    ),
+
+  addReferenceSlot: (input) => {
+    let created: string | null = null
+    set((state) => {
+      const role = input.role && rolesForModality(input.modality).includes(input.role) ? input.role : defaultRoleFor(input.modality)
+      return patchShot(state, (shot) => {
+        const slots = shot.referenceSlots ?? []
+        const id = uid('slot')
+        created = id
+        const next: ReferenceSlot = {
+          id,
+          ownerType: input.ownerType,
+          ownerId: input.ownerId,
+          modality: input.modality,
+          role,
+          retention: defaultRetentionFor(role),
+          order: slots.reduce((max, slot) => Math.max(max, slot.order), -1) + 1,
+          description: '',
+          useSynchronizedAudio: input.modality === 'video_with_audio',
+          defineAudioLabel: false,
+        }
+        const objects =
+          input.ownerType === 'object'
+            ? shot.objects.map((object) =>
+                object.id === input.ownerId ? { ...object, referenceIds: [...new Set([...object.referenceIds, id])] } : object,
+              )
+            : shot.objects
+        return { ...shot, referenceSlots: [...slots, next], objects }
+      })
+    })
+    return created
+  },
+
+  updateReferenceSlot: (id, patch) =>
+    set((state) =>
+      patchShot(state, (shot) => ({
+        ...shot,
+        referenceSlots: (shot.referenceSlots ?? []).map((slot) => {
+          if (slot.id !== id) return slot
+          const next = { ...slot, ...patch, id: slot.id, ownerId: slot.ownerId, ownerType: slot.ownerType }
+          if (next.modality === 'video_with_audio') next.useSynchronizedAudio = true
+          if (next.modality === 'video') next.useSynchronizedAudio = patch.useSynchronizedAudio ?? false
+          if (next.modality !== 'video_with_audio') next.defineAudioLabel = false
+          return next
+        }),
+      })),
+    ),
+
+  removeReferenceSlot: (id) =>
+    set((state) =>
+      patchShot(state, (shot) => ({
+        ...shot,
+        referenceSlots: (shot.referenceSlots ?? []).filter((slot) => slot.id !== id),
+        objects: shot.objects.map((object) => ({
+          ...object,
+          referenceIds: object.referenceIds.filter((item) => item !== id),
+        })),
+      })),
+    ),
+
+  reorderReferenceSlot: (id, direction) =>
+    set((state) =>
+      patchShot(state, (shot) => {
+        const slots = [...(shot.referenceSlots ?? [])].sort((a, b) => a.order - b.order)
+        const index = slots.findIndex((slot) => slot.id === id)
+        const nextIndex = index + direction
+        if (index < 0 || nextIndex < 0 || nextIndex >= slots.length) return shot
+        const current = slots[index].order
+        slots[index] = { ...slots[index], order: slots[nextIndex].order }
+        slots[nextIndex] = { ...slots[nextIndex], order: current }
+        return { ...shot, referenceSlots: slots }
+      }),
     ),
 
   setWorkflow: (workflow) => set({ workflow }),

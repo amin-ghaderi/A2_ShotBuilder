@@ -13,14 +13,16 @@ import type { MotionProject, MotionShot } from '@/motion/types'
 
 function taskPrefix(tags: ResolvedTag[]) {
   const types: string[] = []
-  const hasEdit = tags.some((item) => item.kind === 'video' && (item.reference.role === 'edit-source' || item.reference.role === 'shot'))
-  const hasKeyframe = tags.some((item) => item.kind === 'image' && isStandalonePictureRole(item.reference.role))
-  const hasAudioCopy = tags.some((item) => item.kind === 'audio' && item.reference.role === 'audio')
-  const hasAudioRef = tags.some((item) => item.kind === 'audio' && item.reference.role === 'voice')
+  const hasEdit = tags.some((item) => item.kind === 'video' && item.slot.role === 'edit-source')
+  const hasContinue = tags.some((item) => item.kind === 'video' && item.slot.role === 'continuation')
+  const hasKeyframe = tags.some((item) => item.kind === 'image' && isStandalonePictureRole(item.slot.role))
+  const hasAudioCopy = tags.some((item) => item.kind === 'audio' && (item.slot.role === 'audio' || item.slot.role === 'music'))
+  const hasAudioRef = tags.some((item) => item.kind === 'audio' && item.slot.role === 'voice')
   const hasGuidance = tags.length > 0
   if (hasEdit) types.push('video editing')
+  if (hasContinue) types.push('video continuation')
   if (hasKeyframe) types.push('keyframe completion')
-  if (hasGuidance && !hasEdit) types.push('reference generation')
+  if (hasGuidance && !hasEdit && !hasContinue) types.push('reference generation')
   if (hasAudioCopy) types.push('audio reuse')
   if (hasAudioRef) types.push('audio reference')
   if (types.length === 0) types.push('reference generation')
@@ -37,29 +39,36 @@ function subjectDefinitionLine(subject: PromptSubject) {
           ? 'the environment'
           : subject.description
   const pictures = subject.pictureTags.join(' and ')
-  if (pictures) return `${subject.tag} is ${noun} shown in ${pictures}.`
+  if (pictures) {
+    return `${subject.tag} is ${noun} shown in ${pictures}. Take the identity and appearance MiniMax extracts from ${pictures}; do not invent unprovided facial features, clothing, or model details.`
+  }
   return `${subject.tag} is ${noun} constructed in the 3D shot guide.`
 }
 
 function extraDefinitionLines(tags: ResolvedTag[]) {
   const lines: string[] = []
   tags.forEach((tag) => {
-    if (tag.kind === 'image' && isStandalonePictureRole(tag.reference.role)) {
-      lines.push(`${tag.tag} is a composition/keyframe anchor for [Shot 1].`)
+    if (tag.kind === 'image' && isStandalonePictureRole(tag.slot.role)) {
+      if (tag.slot.role === 'first-frame') lines.push(`${tag.tag} is the first frame of [Shot 1].`)
+      else if (tag.slot.role === 'last-frame') lines.push(`${tag.tag} is the last frame of [Shot 1].`)
+      else lines.push(`${tag.tag} is a composition/keyframe anchor for [Shot 1].`)
     }
     if (tag.kind === 'video') {
       const role =
-        tag.reference.role === 'edit-source'
+        tag.slot.role === 'edit-source'
           ? 'the source video for the target video edit'
-          : tag.reference.role === 'camera'
-            ? 'a camera-trajectory reference'
-            : tag.reference.role === 'motion'
-              ? 'a motion and action reference'
-              : 'a video reference'
+          : tag.slot.role === 'continuation'
+            ? 'the continuation source for the target video'
+            : tag.slot.role === 'camera'
+              ? 'the reference for the camera movement and temporal structure of the shot'
+              : tag.slot.role === 'motion'
+                ? 'a motion and action reference'
+                : 'a video reference'
       lines.push(`${tag.tag} is ${role}.`)
     }
     if (tag.kind === 'audio') {
-      const role = tag.reference.role === 'voice' ? 'a voice-timbre reference' : 'a standalone audio reference'
+      const role =
+        tag.slot.role === 'voice' ? 'a voice-timbre reference' : tag.slot.role === 'music' ? 'a non-diegetic music reference' : 'a standalone audio reference'
       lines.push(`${tag.tag} is ${role}.`)
     }
   })
@@ -72,15 +81,15 @@ function retentionLines(subjects: PromptSubject[], tags: ResolvedTag[]) {
       `${subject.tag} (appears in [Shot 1]): ${subject.retention} - retain the defined ${subject.kind === 'environment' ? 'environment' : 'identity'} from the cited references or the 3D layout.`,
   )
   tags.forEach((tag) => {
-    if (tag.kind === 'image' && isStandalonePictureRole(tag.reference.role)) {
+    if (tag.kind === 'image' && isStandalonePictureRole(tag.slot.role)) {
       lines.push(`${tag.tag} ([Shot 1] composition): ${retentionFor(tag, 'fully_preserved')} - keep viewpoint and placement from this still.`)
     }
     if (tag.kind === 'video') {
-      const marker = tag.reference.role === 'edit-source' ? retentionFor(tag, 'partially_preserved') : retentionFor(tag, 'weak_reference')
-      lines.push(`${tag.tag} (cut and pacing structure): ${marker} - follow the stated ${tag.reference.role} role only.`)
+      const marker = tag.slot.role === 'edit-source' ? retentionFor(tag, 'partially_preserved') : retentionFor(tag, 'weak_reference')
+      lines.push(`${tag.tag} (cut and pacing structure): ${marker} - follow the stated ${tag.slot.role} role only.`)
     }
     if (tag.kind === 'audio') {
-      const marker = tag.reference.role === 'audio' ? retentionFor(tag, 'fully_copy') : retentionFor(tag, 'reference')
+      const marker = tag.slot.role === 'audio' || tag.slot.role === 'music' ? retentionFor(tag, 'fully_copy') : retentionFor(tag, 'reference')
       lines.push(
         `${tag.tag}: ${marker} - ${String(marker).includes('copy') ? 'reuse the audible signal where the shot specifies' : 'reference timbre, rhythm, or texture without copying unprovided dialogue'}.`,
       )
@@ -96,10 +105,10 @@ function firstUse(subjects: PromptSubject[], tags: ResolvedTag[]) {
     else bits.push(`${subject.tag} is present from the 3D layout`)
   })
   tags
-    .filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.reference.role))
+    .filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.slot.role))
     .forEach((tag) => bits.push(`the shot's composition follows ${tag.tag}`))
-  tags.filter((tag) => tag.kind === 'video').forEach((tag) => bits.push(`${tag.tag} supplies the stated ${tag.reference.role} guidance`))
-  tags.filter((tag) => tag.kind === 'audio').forEach((tag) => bits.push(`${tag.tag} is the ${tag.reference.role} audio cue`))
+  tags.filter((tag) => tag.kind === 'video').forEach((tag) => bits.push(`${tag.tag} supplies the stated ${tag.slot.role} guidance`))
+  tags.filter((tag) => tag.kind === 'audio').forEach((tag) => bits.push(`${tag.tag} is the ${tag.slot.role} audio cue`))
   return bits.join('. ')
 }
 
@@ -110,12 +119,14 @@ export function compileRef2VAPrompt(project: MotionProject, shot: MotionShot) {
   const video = tags.find((item) => item.kind === 'video')
   const lead = subjects[0]?.tag
   const summaryCore =
-    video && (video.reference.role === 'edit-source' || video.reference.role === 'shot')
+    video && video.slot.role === 'edit-source'
       ? `The target video is an edited version of ${video.tag}.`
-      : `The target video is a ${shot.duration.toFixed(1)}-second ${shot.aspectRatio} shot${lead ? ` of ${lead}` : ''}.`
+      : video && video.slot.role === 'continuation'
+        ? `The target video continues from ${video.tag}.`
+        : `The target video is a ${shot.duration.toFixed(1)}-second ${shot.aspectRatio} shot${lead ? ` of ${lead}` : ''}.`
   const summaryRefs = [
     ...subjects.map((item) => item.tag),
-    ...tags.filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.reference.role)).map((tag) => tag.tag),
+    ...tags.filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.slot.role)).map((tag) => tag.tag),
     ...tags.filter((tag) => tag.kind === 'video' || tag.kind === 'audio').map((tag) => tag.tag),
   ]
   const summary = `${prefix} ${summaryCore} ${summaryRefs.join(', ') || 'No bound reference assets are present, so the 3D camera path is the motion specification.'}`
@@ -130,7 +141,7 @@ export function compileRef2VAPrompt(project: MotionProject, shot: MotionShot) {
 
   const detailed = [
     style,
-    `[Shot 1] A continuous ${shot.duration.toFixed(1)}-second take opens on the 3D-guided layout. ${layout || 'The frame holds the current 3D arrangement.'}. ${lights}. ${uses}. ${camera} ${action} Do not invent unprovided dialogue, extra characters, or events.`
+    `[Shot 1] A continuous ${shot.duration.toFixed(1)}-second take opens on the 3D-guided layout. ${layout || 'The frame holds the current 3D arrangement.'}. ${lights}. ${uses}. ${camera} ${action} Extract appearance only from the cited picture, video, and audio references. Do not invent unprovided dialogue, extra characters, wardrobe, or events.`
       .replace(/\s+/g, ' ')
       .trim(),
   ]
@@ -146,13 +157,13 @@ export function compileRef2VAPrompt(project: MotionProject, shot: MotionShot) {
 
   const soundscape =
     shot.notes.soundscape.trim() ||
-    (tags.some((tag) => tag.kind === 'audio' && tag.reference.role === 'audio')
+    (tags.some((tag) => tag.kind === 'audio' && tag.slot.role === 'audio')
       ? `Environmental sound follows ${tags
           .filter((tag) => tag.kind === 'audio')
           .map((tag) => tag.tag)
           .join(' and ')}.`
       : 'N/A')
-  const musicTags = tags.filter((tag) => tag.kind === 'audio' && tag.reference.role === 'audio').map((tag) => tag.tag)
+  const musicTags = tags.filter((tag) => tag.kind === 'audio' && (tag.slot.role === 'audio' || tag.slot.role === 'music')).map((tag) => tag.tag)
   const music = shot.notes.music.trim() || (musicTags.length ? `${musicTags.join(' and ')} is defined as reusable audio; use it as audience-only score only if that matches its stated role.` : 'N/A')
 
   const definitions = [...subjects.map(subjectDefinitionLine), ...extraDefinitionLines(tags)]
@@ -184,7 +195,7 @@ export function unresolvedPromptLabels(project: MotionProject, shot: MotionShot)
   const used = promptLabels(text)
   const definedPictures = new Set([
     ...subjects.flatMap((item) => item.pictureTags),
-    ...tags.filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.reference.role)).map((tag) => tag.tag),
+    ...tags.filter((tag) => tag.kind === 'image' && isStandalonePictureRole(tag.slot.role)).map((tag) => tag.tag),
   ])
   const definedVideos = new Set(tags.filter((tag) => tag.kind === 'video').map((tag) => tag.tag))
   const definedAudios = new Set(tags.filter((tag) => tag.kind === 'audio').map((tag) => tag.tag))

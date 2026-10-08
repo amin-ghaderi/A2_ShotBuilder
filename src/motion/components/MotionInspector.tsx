@@ -8,27 +8,59 @@ import { ASPECT_RATIOS, LENS_PRESETS } from '@/lib/constants'
 import { copyText } from '@/lib/copy'
 import { evaluateCamera } from '@/motion/lib/interpolation'
 import { snapshotProject } from '@/motion/lib/projectSnapshot'
-import { buildSingleShotPackage } from '@/motion/lib/exportPackage'
+import { buildSingleShotPackage, buildSlotManifest } from '@/motion/lib/exportPackage'
 import { compileRef2VAPrompt, compileShotCode } from '@/motion/lib/promptCompiler'
-import { manifestForShot, resolveShotTags, validateReferenceLimits } from '@/motion/lib/references'
+import { ownerNameForSlot, resolveShotTags, slotsForOwner, validateReferenceLimits } from '@/motion/lib/references'
 import { bindSingleShotWorkflow, compileMasterWorkflow } from '@/motion/lib/workflow'
 import { SecondsInput } from '@/motion/components/SecondsInput'
-import { MOTION_OBJECT_KINDS, REF2VA_LIMITS, type MotionObjectKind, type MotionReferenceRole } from '@/motion/types'
+import {
+  MOTION_OBJECT_KINDS,
+  REF2VA_LIMITS,
+  defaultRetentionFor,
+  defaultRoleFor,
+  rolesForModality,
+  type MotionObjectKind,
+  type MotionReferenceRole,
+  type ReferenceModality,
+  type ReferenceSlot,
+  type RetentionMarker,
+  type AudioRetentionMarker,
+} from '@/motion/types'
 import { useMotionStore } from '@/store/motionStore'
 import type { AspectRatio } from '@/types/scene'
 import { useEffect, useRef, useState } from 'react'
 
-const ROLES: { value: MotionReferenceRole; label: string }[] = [
-  { value: 'identity', label: 'Identity' },
-  { value: 'appearance', label: 'Look' },
-  { value: 'environment', label: 'Environment' },
-  { value: 'object', label: 'Object' },
-  { value: 'motion', label: 'Motion' },
-  { value: 'camera', label: 'Camera' },
-  { value: 'shot', label: 'Shot' },
-  { value: 'edit-source', label: 'Edit' },
-  { value: 'audio', label: 'Audio' },
-  { value: 'voice', label: 'Voice' },
+const ROLE_LABELS: Record<string, string> = {
+  identity: 'Identity',
+  appearance: 'Appearance',
+  environment: 'Environment',
+  object: 'Object',
+  style: 'Style',
+  'first-frame': 'First frame',
+  'last-frame': 'Last frame',
+  composition: 'Composition',
+  motion: 'Action / movement',
+  camera: 'Camera motion',
+  shot: 'Shot',
+  'edit-source': 'Source video edit',
+  continuation: 'Video continuation',
+  audio: 'Ambient / reuse',
+  voice: 'Voice timbre',
+  music: 'Music',
+}
+
+const VISUAL_RETENTION: { value: RetentionMarker | AudioRetentionMarker; label: string }[] = [
+  { value: 'fully_preserved', label: 'fully_preserved' },
+  { value: 'partially_preserved', label: 'partially_preserved' },
+  { value: 'attribute_transfer', label: 'attribute_transfer' },
+  { value: 'weak_reference', label: 'weak_reference' },
+]
+
+const AUDIO_RETENTION: { value: RetentionMarker | AudioRetentionMarker; label: string }[] = [
+  { value: 'fully_copy', label: 'fully_copy' },
+  { value: 'partially_copy', label: 'partially_copy' },
+  { value: 'reference', label: 'reference' },
+  { value: 'weak_reference', label: 'weak_reference' },
 ]
 
 export function MotionInspector() {
@@ -312,102 +344,189 @@ function CameraPanel() {
 }
 
 function ReferencesPanel() {
-  const references = useMotionStore((state) => state.references)
   const shot = useMotionStore((state) => state.shots.find((item) => item.id === state.activeShotId))
+  const selection = useMotionStore((state) => state.selection)
   const project = snapshotProject(useMotionStore.getState())
-  const limits = shot ? validateReferenceLimits(project, shot) : null
-  const tags = shot ? resolveShotTags(project, shot) : []
+  if (!shot) return null
+  const object = selection.kind === 'object' ? shot.objects.find((item) => item.id === selection.id) : undefined
+  const limits = validateReferenceLimits(project, shot)
+  const tags = resolveShotTags(project, shot)
 
   return (
     <Section title="References">
-      <label className="block rounded-md border border-dashed border-line px-2 py-2 text-[11px] text-muted">
-        Add image, video, or audio
-        <input
-          type="file"
-          accept="image/*,video/*,audio/*"
-          className="mt-1 block w-full text-[10px]"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) void ingestFile(file)
-            event.target.value = ''
-          }}
+      <p className="text-[11px] leading-relaxed text-faint">
+        Declare what MiniMax should read. Select the actual files later in the titled ComfyUI loader nodes. A2 does not store media.
+      </p>
+      {object ? (
+        <SlotList
+          key={object.id}
+          heading={`References for ${object.name}`}
+          ownerType="object"
+          ownerId={object.id}
+          slots={slotsForOwner(shot, 'object', object.id)}
+          tags={tags}
+          defaultModality="image"
         />
-      </label>
-      {limits && !limits.ok && (
-        <p className="text-[11px] text-danger">{limits.problems.join(' ')}</p>
+      ) : (
+        <p className="text-[11px] text-muted">Select an object to assign object references.</p>
       )}
-      <div className="space-y-2">
-        {references.map((reference) => {
-          const bound = shot?.bindings.some((item) => item.referenceId === reference.id)
-          const tag = tags.find((item) => item.reference.id === reference.id)?.tag
-          return (
-            <div key={reference.id} className="rounded-md border border-line p-2 text-[11px]">
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-ink">{reference.name}</span>
-                <span className="font-mono text-faint">{tag ?? reference.kind}</span>
-              </div>
-              <select
-                value={reference.role}
-                className="mt-1 w-full rounded-md border border-line bg-panel px-1 py-1 text-[11px]"
-                onChange={(event) => useMotionStore.getState().updateReference(reference.id, { role: event.target.value as MotionReferenceRole })}
-              >
-                {ROLES.map((role) => (
-                  <option key={role.value} value={role.value}>
-                    {role.label}
-                  </option>
-                ))}
-              </select>
-              <div className="mt-1 flex flex-wrap gap-1">
-                <button type="button" className="text-accent" onClick={() => useMotionStore.getState().bindReference({ referenceId: reference.id, retention: 'fully_preserved' })}>
-                  {bound ? 'Bound' : 'Bind to shot'}
-                </button>
-                {reference.kind === 'video' && (
-                  <button type="button" className="text-muted" onClick={() => useMotionStore.getState().setImportedVideo(reference.id)}>
-                    Use as source
-                  </button>
-                )}
-                <button type="button" className="text-muted" onClick={() => useMotionStore.getState().unbindReference(reference.id)}>
-                  Unbind
-                </button>
-                <button type="button" className="ml-auto text-danger" onClick={() => useMotionStore.getState().removeReference(reference.id)}>
-                  Remove
-                </button>
-              </div>
-            </div>
-          )
-        })}
-      </div>
-      {shot?.importedVideo && <ImportedTrim />}
+      <SlotList
+        heading="Shot references"
+        ownerType="shot"
+        ownerId={shot.id}
+        slots={slotsForOwner(shot, 'shot', shot.id)}
+        tags={tags}
+        defaultModality="video"
+      />
+      {limits.problems.length > 0 && <p className="text-[11px] text-danger">{limits.problems.join(' ')}</p>}
+      {limits.warnings.length > 0 && <p className="text-[11px] text-faint">{limits.warnings.join(' ')}</p>}
     </Section>
   )
 }
 
-function ImportedTrim() {
-  const shot = useMotionStore((state) => state.shots.find((item) => item.id === state.activeShotId))
-  const imported = shot?.importedVideo
-  if (!shot || !imported) return null
+function SlotList({
+  heading,
+  ownerType,
+  ownerId,
+  slots,
+  tags,
+  defaultModality,
+}: {
+  heading: string
+  ownerType: 'object' | 'shot'
+  ownerId: string
+  slots: ReferenceSlot[]
+  tags: ReturnType<typeof resolveShotTags>
+  defaultModality: ReferenceModality
+}) {
+  const [modality, setModality] = useState<ReferenceModality>(defaultModality)
+  const roles = rolesForModality(modality)
+  const [role, setRole] = useState<MotionReferenceRole>(defaultRoleFor(defaultModality))
   return (
     <div className="space-y-2">
-      <Segmented
-        value={imported.role}
-        options={[
-          { value: 'motion', label: 'Motion' },
-          { value: 'camera', label: 'Camera' },
-          { value: 'shot', label: 'Shot' },
-          { value: 'edit-source', label: 'Edit' },
-          { value: 'appearance', label: 'Look' },
-        ]}
-        onChange={(role) => useMotionStore.getState().setImportedRole(role)}
+      <h4 className="text-[10px] uppercase tracking-[0.14em] text-muted">{heading}</h4>
+      <div className="flex flex-wrap gap-1">
+        <select
+          value={modality}
+          className="rounded-md border border-line bg-panel px-1 py-1 text-[11px]"
+          onChange={(event) => {
+            const next = event.target.value as ReferenceModality
+            setModality(next)
+            setRole(defaultRoleFor(next))
+          }}
+        >
+          <option value="image">Image</option>
+          <option value="video">Video</option>
+          <option value="video_with_audio">Video with audio</option>
+          <option value="audio">Audio</option>
+        </select>
+        <select value={role} className="rounded-md border border-line bg-panel px-1 py-1 text-[11px]" onChange={(event) => setRole(event.target.value as MotionReferenceRole)}>
+          {roles.map((item) => (
+            <option key={item} value={item}>
+              {ROLE_LABELS[item] ?? item}
+            </option>
+          ))}
+        </select>
+        <Button type="button" size="sm" variant="outline" onClick={() => useMotionStore.getState().addReferenceSlot({ ownerType, ownerId, modality, role })}>
+          + Add reference slot
+        </Button>
+      </div>
+      {slots.length === 0 && <p className="text-[11px] text-faint">No slots assigned.</p>}
+      {slots.map((slot) => (
+        <SlotCard key={slot.id} slot={slot} tag={tags.find((item) => item.slot.id === slot.id)} />
+      ))}
+    </div>
+  )
+}
+
+function SlotCard({ slot, tag }: { slot: ReferenceSlot; tag?: ReturnType<typeof resolveShotTags>[number] }) {
+  const shot = useMotionStore((state) => state.shots.find((item) => item.id === state.activeShotId))
+  if (!shot) return null
+  const roles = rolesForModality(slot.modality)
+  const index = tag?.index ?? 0
+  const destinations =
+    slot.modality === 'audio'
+      ? [`ref_audios.ref_audio_${Math.max(0, index - 1)}`]
+      : slot.modality === 'image'
+        ? [`ref_images.ref_image_${Math.max(0, index - 1)}`]
+        : slot.modality === 'video_with_audio'
+          ? [`ref_videos.ref_video_${Math.max(0, index - 1)}`, `ref_video_audios.ref_video_audio_${Math.max(0, index - 1)}`]
+          : [`ref_videos.ref_video_${Math.max(0, index - 1)}`]
+  const retentionOptions = slot.modality === 'audio' ? AUDIO_RETENTION : VISUAL_RETENTION
+  return (
+    <div className="space-y-1.5 rounded-md border border-line p-2 text-[11px]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-ink">{ownerNameForSlot(shot, slot)}</span>
+        <span className="font-mono text-faint">{tag?.tag ?? '—'}</span>
+      </div>
+      <p className="font-mono text-[10px] text-faint">{destinations.join(' · ')}</p>
+      <p className="text-[10px] text-muted">Assign media in ComfyUI</p>
+      <select
+        value={slot.modality}
+        className="w-full rounded-md border border-line bg-panel px-1 py-1"
+        onChange={(event) => {
+          const next = event.target.value as ReferenceModality
+          const role = defaultRoleFor(next)
+          useMotionStore.getState().updateReferenceSlot(slot.id, { modality: next, role, retention: defaultRetentionFor(role) })
+        }}
+      >
+        <option value="image">Image</option>
+        <option value="video">Video</option>
+        <option value="video_with_audio">Video with audio</option>
+        <option value="audio">Audio</option>
+      </select>
+      <select
+        value={roles.includes(slot.role) ? slot.role : roles[0]}
+        className="w-full rounded-md border border-line bg-panel px-1 py-1"
+        onChange={(event) => useMotionStore.getState().updateReferenceSlot(slot.id, { role: event.target.value as MotionReferenceRole })}
+      >
+        {roles.map((item) => (
+          <option key={item} value={item}>
+            {ROLE_LABELS[item] ?? item}
+          </option>
+        ))}
+      </select>
+      <select
+        value={retentionOptions.some((item) => item.value === slot.retention) ? slot.retention : retentionOptions[0].value}
+        className="w-full rounded-md border border-line bg-panel px-1 py-1"
+        onChange={(event) => useMotionStore.getState().updateReferenceSlot(slot.id, { retention: event.target.value as RetentionMarker | AudioRetentionMarker })}
+      >
+        {retentionOptions.map((item) => (
+          <option key={item.value} value={item.value}>
+            {item.label}
+          </option>
+        ))}
+      </select>
+      <input
+        value={slot.description}
+        placeholder="Optional semantic notes"
+        className="w-full rounded-md border border-line bg-panel px-1 py-1 text-[11px]"
+        onChange={(event) => useMotionStore.getState().updateReferenceSlot(slot.id, { description: event.target.value })}
       />
-      <SliderField label="Trim start" value={imported.trimStart} min={0} max={Math.max(0.1, imported.trimEnd - 0.1)} step={0.05} display={`${imported.trimStart.toFixed(2)}s`} onChange={(value) => useMotionStore.getState().setImportedTrim(value, imported.trimEnd)} />
-      <SliderField label="Trim end" value={imported.trimEnd} min={imported.trimStart + 0.1} max={30} step={0.05} display={`${imported.trimEnd.toFixed(2)}s`} onChange={(value) => useMotionStore.getState().setImportedTrim(imported.trimStart, value)} />
+      {slot.modality === 'video_with_audio' && (
+        <label className="flex items-center justify-between gap-2 text-muted">
+          Define &lt;Audio&gt; label for synced track
+          <Switch checked={slot.defineAudioLabel} onCheckedChange={(value) => useMotionStore.getState().updateReferenceSlot(slot.id, { defineAudioLabel: value })} />
+        </label>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="text-muted" onClick={() => useMotionStore.getState().reorderReferenceSlot(slot.id, -1)}>
+          Up
+        </button>
+        <button type="button" className="text-muted" onClick={() => useMotionStore.getState().reorderReferenceSlot(slot.id, 1)}>
+          Down
+        </button>
+        <button type="button" className="ml-auto text-danger" onClick={() => useMotionStore.getState().removeReferenceSlot(slot.id)}>
+          Remove slot
+        </button>
+      </div>
     </div>
   )
 }
 
 function PromptPanel() {
   const shot = useMotionStore((state) => state.shots.find((item) => item.id === state.activeShotId))
-  const version = useMotionStore((state) => `${state.activeShotId}:${state.updatedAt}:${state.shots.length}:${state.references.length}`)
+  const version = useMotionStore((state) => `${state.activeShotId}:${state.updatedAt}:${state.shots.length}:${state.shots.find((item) => item.id === state.activeShotId)?.referenceSlots.length ?? 0}`)
   if (!shot) return null
   const project = snapshotProject(useMotionStore.getState())
   const prompt = compileRef2VAPrompt(project, shot)
@@ -449,11 +568,11 @@ function ExportPanel() {
         <Button type="button" size="sm" variant="outline" onClick={() => exportManifest()}>
           Manifest
         </Button>
-        <Button type="button" size="sm" onClick={() => setMessage(exportPackage(customWorkflow))}>
-          Export package ZIP
+        <Button type="button" size="sm" onClick={() => setMessage(exportWorkflow(customWorkflow))}>
+          Export ComfyUI workflow
         </Button>
-        <Button type="button" size="sm" variant="outline" onClick={() => setMessage(exportWorkflow(customWorkflow))}>
-          ComfyUI workflow
+        <Button type="button" size="sm" variant="outline" onClick={() => setMessage(exportPackage(customWorkflow))}>
+          Template ZIP
         </Button>
         <Button type="button" size="sm" variant="ghost" onClick={() => setMessage(compileMasterWorkflow().reason)}>
           Master workflow
@@ -540,7 +659,12 @@ function exportManifest() {
   const project = activeProject()
   const shot = project.shots.find((item) => item.id === project.activeShotId)
   if (!shot) return
-  download(`${shot.id}-manifest.json`, JSON.stringify(manifestForShot(project, shot), null, 2))
+  const bound = bindSingleShotWorkflow(project, shot)
+  if (!bound.ok) {
+    download(`${shot.id}-manifest.json`, JSON.stringify({ shot: shot.id, status: 'invalid', reason: bound.reason, diagnostics: bound.diagnostics }, null, 2))
+    return
+  }
+  download(`${shot.id}-manifest.json`, JSON.stringify(buildSlotManifest(shot, bound), null, 2))
 }
 
 function exportWorkflow(template: unknown) {
@@ -551,7 +675,7 @@ function exportWorkflow(template: unknown) {
   if (!result.ok) return result.reason
   download(`${shot.id}-minimax-h3-r2v.json`, JSON.stringify(result.editor, null, 2))
   download(`${shot.id}-minimax-h3-r2v.api.json`, JSON.stringify(result.api, null, 2))
-  return `Single-shot official Ref2VA graph exported. ${result.diagnostics.join(' ')} Not executed in ComfyUI.`
+  return `TEMPLATE READY. Select media in each titled ComfyUI loader before queueing. ${result.diagnostics.join(' ')}`
 }
 
 function exportPackage(template: unknown) {
@@ -566,7 +690,7 @@ function exportPackage(template: unknown) {
   link.download = `${shot.id}-ref2va-package.zip`
   link.click()
   URL.revokeObjectURL(url)
-  return `Single-shot package downloaded (${packed.filenames.length} files). Copy media/ into the ComfyUI input folder before queueing. Not executed in ComfyUI.`
+  return `Template ZIP downloaded (${packed.filenames.length} files). TEMPLATE READY, not execution-ready.`
 }
 
 async function importProjectFile(file: File) {
@@ -620,34 +744,4 @@ async function exportGuideVideo() {
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-async function ingestFile(file: File) {
-  const dataUrl = await readFile(file)
-  const kind = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image'
-  const role: MotionReferenceRole = kind === 'audio' ? 'voice' : kind === 'video' ? 'motion' : 'identity'
-  useMotionStore.getState().addReference({
-    kind,
-    name: file.name,
-    filename: file.name,
-    mime: file.type,
-    dataUrl,
-    role,
-    description: '',
-    trimStart: 0,
-    trimEnd: kind === 'video' ? 8 : 0,
-  })
-  if (kind === 'video' && useMotionStore.getState().shots.find((item) => item.id === useMotionStore.getState().activeShotId)?.sourceMode === 'import-video') {
-    const created = useMotionStore.getState().references.at(-1)
-    if (created) useMotionStore.getState().setImportedVideo(created.id)
-  }
-}
-
-function readFile(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
 }

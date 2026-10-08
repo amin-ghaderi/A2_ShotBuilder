@@ -1,3 +1,5 @@
+import { migrateBindingsToSlots } from '@/motion/lib/references'
+import type { MotionProject } from '@/motion/types'
 import { z } from 'zod'
 
 const vec3 = z.tuple([z.number(), z.number(), z.number()])
@@ -129,10 +131,35 @@ export const motionProjectSchema = z.object({
         music: z.string(),
       }),
       compiledPrompt: z.string().optional(),
+      referenceSlots: z
+        .array(
+          z.object({
+            id: z.string(),
+            ownerType: z.enum(['object', 'shot']),
+            ownerId: z.string(),
+            modality: z.enum(['image', 'video', 'video_with_audio', 'audio']),
+            role: z.string(),
+            retention: z.string(),
+            order: z.number(),
+            description: z.string().optional().default(''),
+            useSynchronizedAudio: z.boolean().optional().default(false),
+            defineAudioLabel: z.boolean().optional().default(false),
+          }),
+        )
+        .optional()
+        .default([]),
     }),
   ),
 })
 
-export function parseMotionProject(input: unknown) {
-  return motionProjectSchema.parse(input)
+export function parseMotionProject(input: unknown): MotionProject {
+  const parsed = motionProjectSchema.parse(input)
+  const project = parsed as MotionProject
+  return {
+    ...project,
+    shots: project.shots.map((shot) => ({
+      ...shot,
+      referenceSlots: shot.referenceSlots.length > 0 ? shot.referenceSlots : migrateBindingsToSlots(project, shot),
+    })),
+  }
 }

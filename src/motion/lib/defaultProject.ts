@@ -81,6 +81,7 @@ export function createDefaultShot(name = 'Shot 1'): MotionShot {
     ],
     framing: { aspectRatio: '16:9' },
     bindings: [],
+    referenceSlots: [],
     notes: {
       style: 'The target video uses a photoreal live-action look with natural studio lighting.',
       action: '',

@@ -15,9 +15,12 @@ export type ComfyEditorWorkflow = {
 export type WorkflowExportResult =
   | {
       ok: true
+      readiness: 'template'
+      executionReady: false
       editor: ComfyEditorWorkflow
       api: Record<string, { class_type: string; inputs: Record<string, unknown> }>
       diagnostics: string[]
+      warnings: string[]
       manifest: ManifestEntry[]
       prompt: string
       executed: false
@@ -42,6 +45,7 @@ type EditorNode = Record<string, unknown> & {
   flags?: Record<string, unknown>
   order?: number
   mode?: number
+  title?: string
   properties?: Record<string, unknown>
 }
 
@@ -151,11 +155,12 @@ function ensureInput(generation: EditorNode, name: string, type: string, label?:
   return index
 }
 
-function addLoadImage(editor: ComfyEditorWorkflow, filename: string, x: number, y: number) {
+function addLoadImage(editor: ComfyEditorWorkflow, filename: string, x: number, y: number, title?: string) {
   const nodeId = nextNodeId(editor)
   const node: EditorNode = {
     id: nodeId,
     type: 'LoadImage',
+    title,
     pos: [x, y],
     size: [290, 330],
     flags: {},
@@ -174,11 +179,12 @@ function addLoadImage(editor: ComfyEditorWorkflow, filename: string, x: number, 
   return node
 }
 
-function addLoadVideo(editor: ComfyEditorWorkflow, filename: string, x: number, y: number) {
+function addLoadVideo(editor: ComfyEditorWorkflow, filename: string, x: number, y: number, title?: string) {
   const nodeId = nextNodeId(editor)
   const node: EditorNode = {
     id: nodeId,
     type: 'LoadVideo',
+    title,
     pos: [x, y],
     size: [270, 80],
     flags: {},
@@ -218,11 +224,12 @@ function addGetVideoComponents(editor: ComfyEditorWorkflow, x: number, y: number
   return node
 }
 
-function addLoadAudio(editor: ComfyEditorWorkflow, filename: string, x: number, y: number) {
+function addLoadAudio(editor: ComfyEditorWorkflow, filename: string, x: number, y: number, title?: string) {
   const nodeId = nextNodeId(editor)
   const node: EditorNode = {
     id: nodeId,
     type: 'LoadAudio',
+    title,
     pos: [x, y],
     size: [270, 80],
     flags: {},
@@ -350,7 +357,8 @@ export function bindSingleShotWorkflow(project: MotionProject, shot: MotionShot,
 
   const editor = structuredClone(inspected.graph)
   const nodes = asNodes(editor)
-  const diagnostics: string[] = []
+  const diagnostics: string[] = [...limits.warnings]
+  const warnings = [...limits.warnings]
   const generation = nodes.find((node) => node.type === GENERATION)
   const promptNode = nodes.find((node) => node.type === 'PrimitiveStringMultiline')
   const durationNode =
@@ -397,29 +405,37 @@ export function bindSingleShotWorkflow(project: MotionProject, shot: MotionShot,
   pictures.forEach((item, index) => {
     const slot = item.slot
     const inputIndex = ensureInput(generation, slot, 'IMAGE', `ref_image_${index}`)
-    const loader = imageLoaders[index] ?? addLoadImage(editor, item.exportFilename, -1050 + index * 320, 5960 + Math.floor(index / 3) * 360)
-    setNamed(loader, 'image', item.exportFilename)
+    const filename = item.mediaAssigned ? item.exportFilename : ''
+    const loader = imageLoaders[index] ?? addLoadImage(editor, filename, -1050 + index * 320, 5960 + Math.floor(index / 3) * 360, item.loaderTitle)
+    loader.title = item.loaderTitle
+    setNamed(loader, 'image', filename)
     keepImages.add(loader.id)
     connect(editor, loader, 0, generation, inputIndex, 'IMAGE')
+    item.loaderNodeId = loader.id
   })
   pruneUnusedImageLoaders(editor, keepImages)
 
   videos.forEach((item, index) => {
     const videoSlot = item.slot
-    const audioSlot = item.pairedVideoSlot ?? `ref_video_audios.ref_video_audio_${index}`
     const videoIndex = ensureInput(generation, videoSlot, 'IMAGE', `ref_video_${index}`)
-    const audioIndex = ensureInput(generation, audioSlot, 'AUDIO', `ref_video_audio_${index}`)
-    const loader = addLoadVideo(editor, item.exportFilename, -1490, 5200 + index * 220)
+    const filename = item.mediaAssigned ? item.exportFilename : ''
+    const loader = addLoadVideo(editor, filename, -1490, 5200 + index * 220, item.loaderTitle)
     const split = addGetVideoComponents(editor, -1180, 5200 + index * 220)
     connect(editor, loader, 0, split, 0, 'VIDEO')
     connect(editor, split, 0, generation, videoIndex, 'IMAGE')
-    connect(editor, split, 1, generation, audioIndex, 'AUDIO')
+    if (item.pairedVideoSlot) {
+      const audioIndex = ensureInput(generation, item.pairedVideoSlot, 'AUDIO', `ref_video_audio_${index}`)
+      connect(editor, split, 1, generation, audioIndex, 'AUDIO')
+    }
+    item.loaderNodeId = loader.id
   })
 
   audios.forEach((item, index) => {
     const inputIndex = ensureInput(generation, item.slot, 'AUDIO', `ref_audio_${index}`)
-    const loader = addLoadAudio(editor, item.exportFilename, -1490, 4700 + index * 160)
+    const filename = item.mediaAssigned ? item.exportFilename : ''
+    const loader = addLoadAudio(editor, filename, -1490, 4700 + index * 160, item.loaderTitle)
     connect(editor, loader, 0, generation, inputIndex, 'AUDIO')
+    item.loaderNodeId = loader.id
   })
 
   const leftover = TEMPLATE_EXAMPLE_IMAGES.filter((name) => {
@@ -436,8 +452,10 @@ export function bindSingleShotWorkflow(project: MotionProject, shot: MotionShot,
     if (item.kind === 'video' && item.pairedVideoSlot && !generationInput(editor, item.pairedVideoSlot)?.link) {
       missingConnections.push(`${item.comfyTag} soundtrack is not connected to ${item.pairedVideoSlot}.`)
     }
-    if (connectedFilename(editor, item.slot) !== item.exportFilename) {
-      missingConnections.push(`${item.comfyTag} filename ${item.exportFilename} is not on ${item.slot}.`)
+    const connected = connectedFilename(editor, item.slot)
+    const expected = item.mediaAssigned ? item.exportFilename : ''
+    if (connected !== expected && !(expected === '' && connected === '')) {
+      missingConnections.push(`${item.comfyTag} loader is not connected to ${item.slot}.`)
     }
   })
   if (missingConnections.length) {
@@ -479,18 +497,22 @@ export function bindSingleShotWorkflow(project: MotionProject, shot: MotionShot,
   })
   if (missingConnections.length) return { ok: false, reason: missingConnections[0], diagnostics: missingConnections }
 
-  manifest.forEach((item) => {
-    if (item.kind === 'image') return
-    const span = Math.max(0, item.trimEnd - item.trimStart)
-    if (item.trimStart > 0.05 || (span > 0 && item.trimEnd + 0.05 < (project.references.find((ref) => ref.id === item.assetId)?.duration ?? item.trimEnd))) {
-      diagnostics.push(
-        `${item.comfyTag} trim ${item.trimStart.toFixed(2)}–${item.trimEnd.toFixed(2)}s is recorded in the prompt and manifest only. Official LoadVideo/LoadAudio have no trim input, so ComfyUI receives the full uploaded file.`,
-      )
-    }
-  })
-
-  diagnostics.push('Copy media/* into the ComfyUI input folder before queueing. This graph has not been executed.')
-  return { ok: true, editor, api: api.api, diagnostics, manifest, prompt, executed: false }
+  if (!manifest.some((item) => item.mediaAssigned)) {
+    diagnostics.push('Open this workflow in ComfyUI and select the actual media in each titled loader node. A2 does not store reference files.')
+  }
+  diagnostics.push('TEMPLATE READY: graph structure is valid. Not execution-ready. MiniMax inference has not been run.')
+  return {
+    ok: true,
+    readiness: 'template',
+    executionReady: false,
+    editor,
+    api: api.api,
+    diagnostics,
+    warnings,
+    manifest,
+    prompt,
+    executed: false,
+  }
 }
 
 export function compileMasterWorkflow(): { ok: false; reason: string } {

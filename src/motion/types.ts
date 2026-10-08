@@ -8,17 +8,25 @@ export type MotionSourceMode = 'build-3d' | 'import-video'
 
 export type MotionAssetKind = 'image' | 'video' | 'audio'
 
+export type ReferenceModality = 'image' | 'video' | 'video_with_audio' | 'audio'
+
 export type MotionReferenceRole =
   | 'identity'
   | 'appearance'
   | 'environment'
   | 'object'
+  | 'style'
+  | 'first-frame'
+  | 'last-frame'
+  | 'composition'
   | 'motion'
   | 'camera'
   | 'shot'
   | 'edit-source'
+  | 'continuation'
   | 'audio'
   | 'voice'
+  | 'music'
 
 export type RetentionMarker =
   | 'fully_preserved'
@@ -27,6 +35,19 @@ export type RetentionMarker =
   | 'weak_reference'
 
 export type AudioRetentionMarker = 'fully_copy' | 'partially_copy' | 'reference' | 'weak_reference'
+
+export type ReferenceSlot = {
+  id: string
+  ownerType: 'object' | 'shot'
+  ownerId: string
+  modality: ReferenceModality
+  role: MotionReferenceRole
+  retention: RetentionMarker | AudioRetentionMarker
+  order: number
+  description: string
+  useSynchronizedAudio: boolean
+  defineAudioLabel: boolean
+}
 
 export type MotionSelection =
   | { kind: 'none' }
@@ -138,6 +159,7 @@ export type MotionShot = {
   }
   importedVideo?: ImportedVideoState
   bindings: ShotReferenceBinding[]
+  referenceSlots: ReferenceSlot[]
   notes: {
     style: string
     action: string
@@ -184,9 +206,44 @@ export const REF2VA_LIMITS = {
 
 export const TEMPLATE_EXAMPLE_IMAGES = ['red_superboy_on_city_roof.png', 'mecha_dragon_lightning.png'] as const
 
-export const STANDALONE_PICTURE_ROLES: MotionReferenceRole[] = ['shot', 'camera']
+export const STANDALONE_PICTURE_ROLES: MotionReferenceRole[] = ['shot', 'camera', 'first-frame', 'last-frame', 'composition']
 
-export const APPEARANCE_PICTURE_ROLES: MotionReferenceRole[] = ['identity', 'appearance', 'object', 'environment']
+export const APPEARANCE_PICTURE_ROLES: MotionReferenceRole[] = ['identity', 'appearance', 'object', 'environment', 'style']
+
+export const IMAGE_SLOT_ROLES: MotionReferenceRole[] = [
+  'identity',
+  'appearance',
+  'environment',
+  'object',
+  'style',
+  'first-frame',
+  'last-frame',
+  'composition',
+]
+
+export const VIDEO_SLOT_ROLES: MotionReferenceRole[] = ['camera', 'motion', 'edit-source', 'continuation']
+
+export const AUDIO_SLOT_ROLES: MotionReferenceRole[] = ['voice', 'audio', 'music']
+
+export function rolesForModality(modality: ReferenceModality): MotionReferenceRole[] {
+  if (modality === 'image') return IMAGE_SLOT_ROLES
+  if (modality === 'audio') return AUDIO_SLOT_ROLES
+  return VIDEO_SLOT_ROLES
+}
+
+export function defaultRoleFor(modality: ReferenceModality): MotionReferenceRole {
+  if (modality === 'image') return 'identity'
+  if (modality === 'audio') return 'voice'
+  return 'camera'
+}
+
+export function defaultRetentionFor(role: MotionReferenceRole): RetentionMarker | AudioRetentionMarker {
+  if (role === 'edit-source') return 'partially_preserved'
+  if (role === 'camera' || role === 'motion' || role === 'continuation' || role === 'style' || role === 'composition') return 'weak_reference'
+  if (role === 'voice') return 'reference'
+  if (role === 'audio' || role === 'music') return 'fully_copy'
+  return 'fully_preserved'
+}
 
 export const H3_FRAME_EXPRESSION = 'max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17'
 
