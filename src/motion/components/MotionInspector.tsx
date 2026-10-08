@@ -2,6 +2,7 @@ import { Copy, Plus, Trash2 } from 'lucide-react'
 import { Section, Segmented, SliderField } from '@/components/controls/fields'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { ASPECT_RATIOS, LENS_PRESETS } from '@/lib/constants'
 import { copyText } from '@/lib/copy'
@@ -11,10 +12,11 @@ import { buildSingleShotPackage } from '@/motion/lib/exportPackage'
 import { compileRef2VAPrompt, compileShotCode } from '@/motion/lib/promptCompiler'
 import { manifestForShot, resolveShotTags, validateReferenceLimits } from '@/motion/lib/references'
 import { bindSingleShotWorkflow, compileMasterWorkflow } from '@/motion/lib/workflow'
+import { SecondsInput } from '@/motion/components/SecondsInput'
 import { MOTION_OBJECT_KINDS, REF2VA_LIMITS, type MotionObjectKind, type MotionReferenceRole } from '@/motion/types'
 import { useMotionStore } from '@/store/motionStore'
 import type { AspectRatio } from '@/types/scene'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 const ROLES: { value: MotionReferenceRole; label: string }[] = [
   { value: 'identity', label: 'Identity' },
@@ -65,13 +67,7 @@ function ShotList() {
           </button>
         ))}
       </div>
-      {current && (
-        <input
-          value={current.name}
-          onChange={(event) => useMotionStore.getState().renameShot(current.id, event.target.value)}
-          className="w-full rounded-md border border-line bg-panel px-2 py-1 text-xs text-ink"
-        />
-      )}
+      {current && <ShotNameField key={current.id} shotId={current.id} name={current.name} />}
       <div className="flex flex-wrap gap-1">
         <Button type="button" size="sm" variant="outline" onClick={() => useMotionStore.getState().addShot()}>
           <Plus className="size-3.5" /> Add
@@ -90,6 +86,69 @@ function ShotList() {
         </Button>
       </div>
     </Section>
+  )
+}
+
+function ShotNameField({ shotId, name }: { shotId: string; name: string }) {
+  const focused = useRef(false)
+  const [draft, setDraft] = useState(name)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!focused.current) {
+      setDraft(name)
+      setError(null)
+    }
+  }, [name, shotId])
+
+  const commit = () => {
+    const trimmed = draft.trim()
+    if (!trimmed) {
+      setError('Shot name cannot be empty.')
+      setDraft(name)
+      return
+    }
+    setError(null)
+    if (trimmed !== name) useMotionStore.getState().renameShot(shotId, trimmed)
+    setDraft(trimmed)
+  }
+
+  return (
+    <div className="space-y-1" onPointerDown={(event) => event.stopPropagation()}>
+      <Label htmlFor={`motion-shot-name-${shotId}`}>Shot name</Label>
+      <input
+        id={`motion-shot-name-${shotId}`}
+        type="text"
+        autoComplete="off"
+        spellCheck={false}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? `motion-shot-name-${shotId}-error` : undefined}
+        value={draft}
+        onFocus={() => {
+          focused.current = true
+        }}
+        onChange={(event) => {
+          setDraft(event.target.value)
+          setError(null)
+        }}
+        onBlur={() => {
+          focused.current = false
+          commit()
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            ;(event.target as HTMLInputElement).blur()
+          }
+        }}
+        className="w-full rounded-md border border-line bg-panel px-2 py-1 text-xs text-ink"
+      />
+      {error && (
+        <p id={`motion-shot-name-${shotId}-error`} className="text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -121,15 +180,32 @@ function SceneControls() {
           </button>
         ))}
       </div>
-      <SliderField
-        label="Duration"
-        value={shot.duration}
-        min={REF2VA_LIMITS.minDuration}
-        max={REF2VA_LIMITS.maxDuration}
-        step={0.5}
-        display={`${shot.duration.toFixed(1)}s`}
-        onChange={(value) => useMotionStore.getState().setDuration(value)}
-      />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="motion-shot-duration">Shot duration</Label>
+          <SecondsInput
+            id="motion-shot-duration"
+            value={shot.duration}
+            min={REF2VA_LIMITS.minDuration}
+            max={REF2VA_LIMITS.maxDuration}
+            digits={1}
+            onCommit={(value) => useMotionStore.getState().setDuration(value)}
+          />
+        </div>
+        <Slider
+          value={[shot.duration]}
+          min={REF2VA_LIMITS.minDuration}
+          max={REF2VA_LIMITS.maxDuration}
+          step={0.5}
+          aria-label="Shot duration"
+          onValueChange={([value]) => {
+            if (typeof value === 'number') useMotionStore.getState().setDuration(value)
+          }}
+        />
+        <p className="text-[11px] leading-relaxed text-faint">
+          4.0–15.0s. Shortening keeps existing keys; only a key that sits on the previous shot end moves with duration.
+        </p>
+      </div>
       <Segmented
         value={shot.aspectRatio}
         options={ASPECT_RATIOS.map((ratio) => ({ value: ratio, label: ratio }))}

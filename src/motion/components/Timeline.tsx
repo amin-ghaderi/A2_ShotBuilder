@@ -1,5 +1,6 @@
 import { Diamond, Pause, Play } from 'lucide-react'
 import { useEffect, useRef } from 'react'
+import { SecondsInput } from '@/motion/components/SecondsInput'
 import { evaluateCamera } from '@/motion/lib/interpolation'
 import { useMotionStore } from '@/store/motionStore'
 
@@ -9,8 +10,8 @@ export function Timeline() {
   const live = evaluateCamera(shot.cameraKeys, shot.currentTime)
 
   return (
-    <section className="flex h-[132px] shrink-0 flex-col border-t border-line bg-panel/90">
-      <div className="flex h-9 items-center gap-2 border-b border-line px-3">
+    <section className="flex h-[148px] shrink-0 flex-col border-t border-line bg-panel/90">
+      <div className="flex min-h-9 flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
         <button
           type="button"
           className="inline-flex size-7 items-center justify-center rounded-md border border-line text-ink"
@@ -19,9 +20,16 @@ export function Timeline() {
         >
           {shot.playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
         </button>
-        <span className="font-mono text-[11px] text-muted">
-          {shot.currentTime.toFixed(2)}s / {shot.duration.toFixed(1)}s
-        </span>
+        <SecondsInput
+          id="motion-current-time"
+          label="Current time"
+          value={shot.currentTime}
+          min={0}
+          max={shot.duration}
+          digits={2}
+          onCommit={(value) => useMotionStore.getState().setCurrentTime(value)}
+        />
+        <span className="font-mono text-[11px] text-faint">Shot duration {shot.duration.toFixed(1)}s</span>
         <button
           type="button"
           className="rounded-md border border-line px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-muted hover:text-ink"
@@ -38,17 +46,20 @@ export function Timeline() {
           max={shot.duration}
           step={0.01}
           value={shot.currentTime}
+          aria-label="Current time"
           onChange={(event) => useMotionStore.getState().setCurrentTime(Number(event.target.value))}
           className="w-full accent-[#d4a574]"
         />
-        <div className="relative mt-2 h-6">
-          {shot.cameraKeys.map((key) => (
+        <div className="relative mt-2 h-6 overflow-hidden">
+          {shot.cameraKeys
+            .filter((key) => key.time >= -0.001 && key.time <= shot.duration + 0.001)
+            .map((key) => (
             <button
               key={key.time}
               type="button"
               title={`${key.time.toFixed(2)}s`}
               className="absolute top-0 -translate-x-1/2 text-accent"
-              style={{ left: `${(key.time / shot.duration) * 100}%` }}
+              style={{ left: `${(key.time / Math.max(shot.duration, 0.01)) * 100}%` }}
               onClick={() => useMotionStore.getState().setCurrentTime(key.time)}
               onDoubleClick={() => useMotionStore.getState().deleteCameraKeyframe(key.time)}
             >

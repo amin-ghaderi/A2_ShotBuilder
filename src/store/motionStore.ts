@@ -103,17 +103,27 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
       }),
     ),
 
+  /**
+   * Duration policy: clamp to 4–15s and keep currentTime in range.
+   * Never delete camera, object, or light keys. Keys that sit on the previous
+   * shot end (within 50ms) move with the new duration so the shot still has an
+   * end pose. Every other key keeps its original time, including keys past the
+   * new duration; they stay in the shot and become playable again if duration grows.
+   */
   setDuration: (duration) =>
     set((state) =>
       patchShot(state, (shot) => {
         const next = clamp(duration, REF2VA_LIMITS.minDuration, REF2VA_LIMITS.maxDuration)
+        const previous = shot.duration
+        const retargetEnd = <T extends { time: number }>(keys: T[]) =>
+          keys.map((key) => (Math.abs(key.time - previous) <= 0.05 ? { ...key, time: next } : key))
         return {
           ...shot,
           duration: next,
-          currentTime: Math.min(shot.currentTime, next),
-          cameraKeys: shot.cameraKeys.map((key, index, keys) =>
-            index === keys.length - 1 ? { ...key, time: next } : key,
-          ),
+          currentTime: clamp(shot.currentTime, 0, next),
+          cameraKeys: retargetEnd(shot.cameraKeys),
+          objects: shot.objects.map((object) => ({ ...object, keyframes: retargetEnd(object.keyframes) })),
+          lights: shot.lights.map((light) => ({ ...light, keyframes: retargetEnd(light.keyframes) })),
         }
       }),
     ),
@@ -315,7 +325,11 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
     })),
 
   renameShot: (id, name) =>
-    set((state) => ({ shots: state.shots.map((shot) => (shot.id === id ? { ...shot, name } : shot)) })),
+    set((state) => {
+      const trimmed = name.trim()
+      if (!trimmed) return state
+      return { shots: state.shots.map((shot) => (shot.id === id ? { ...shot, name: trimmed } : shot)) }
+    }),
 
   reorderShot: (id, direction) =>
     set((state) => {

@@ -349,5 +349,83 @@ export function runAcceptanceChecks(): { ok: boolean; results: CheckResult[] } {
   const badPack = buildSingleShotPackage(ten, ten.shots[0])
   results.push(check('Fail-closed package refuses 10 images', !badPack.ok))
 
+  useMotionStore.getState().resetProject()
+  const namedFirst = useMotionStore.getState().activeShotId
+  useMotionStore.getState().renameShot(namedFirst, 'Person and Car Test')
+  useMotionStore.getState().addShot()
+  const namedSecond = useMotionStore.getState().activeShotId
+  useMotionStore.getState().renameShot(namedSecond, 'Second Pass')
+  useMotionStore.getState().selectShot(namedFirst)
+  const afterSwitch = useMotionStore.getState()
+  results.push(
+    check(
+      'Shot names persist across selection',
+      afterSwitch.shots.find((item) => item.id === namedFirst)?.name === 'Person and Car Test' &&
+        afterSwitch.shots.find((item) => item.id === namedSecond)?.name === 'Second Pass' &&
+        afterSwitch.activeShotId === namedFirst,
+    ),
+  )
+  const emptyName = afterSwitch.shots.find((item) => item.id === namedFirst)?.name
+  useMotionStore.getState().renameShot(namedFirst, '   ')
+  results.push(check('Whitespace-only rename is rejected', useMotionStore.getState().shots.find((item) => item.id === namedFirst)?.name === emptyName))
+
+  useMotionStore.getState().setCurrentTime(4)
+  useMotionStore.getState().insertCameraKeyframe()
+  const objectId = useMotionStore.getState().shots.find((item) => item.id === namedFirst)?.objects[0]?.id
+  if (objectId) useMotionStore.getState().insertObjectKeyframe(objectId)
+  const keysBefore = useMotionStore.getState().shots.find((item) => item.id === namedFirst)
+  const midCamera = keysBefore?.cameraKeys.find((key) => Math.abs(key.time - 4) < 0.05)
+  const midObject = keysBefore?.objects[0]?.keyframes.find((key) => Math.abs(key.time - 4) < 0.05)
+  useMotionStore.getState().setDuration(6)
+  const shortened = useMotionStore.getState().shots.find((item) => item.id === namedFirst)
+  results.push(check('Typed duration 6s is stored', shortened?.duration === 6))
+  results.push(check('Playhead clamps into the new duration', (shortened?.currentTime ?? 99) <= 6))
+  results.push(
+    check(
+      'End camera key moves with duration; mid keys are kept',
+      Boolean(shortened?.cameraKeys.some((key) => Math.abs(key.time - 6) < 0.05)) &&
+        Boolean(shortened?.cameraKeys.some((key) => Math.abs(key.time - 4) < 0.05)) &&
+        Boolean(midCamera) &&
+        Boolean(midObject) &&
+        Boolean(shortened?.objects[0]?.keyframes.some((key) => Math.abs(key.time - 4) < 0.05)),
+    ),
+  )
+  useMotionStore.getState().setDuration(10)
+  const lengthened = useMotionStore.getState().shots.find((item) => item.id === namedFirst)
+  results.push(check('Slider duration 10s is stored', lengthened?.duration === 10))
+  results.push(
+    check(
+      'Lengthening keeps the mid key and moves the end pose',
+      Boolean(lengthened?.cameraKeys.some((key) => Math.abs(key.time - 4) < 0.05)) &&
+        Boolean(lengthened?.cameraKeys.some((key) => Math.abs(key.time - 10) < 0.05)),
+    ),
+  )
+  useMotionStore.getState().setPlaying(true)
+  useMotionStore.getState().setCurrentTime(3)
+  const scrubbed = useMotionStore.getState().shots.find((item) => item.id === namedFirst)
+  results.push(check('Current time 3s pauses playback', scrubbed?.currentTime === 3 && scrubbed.playing === false))
+  const namedPrompt = compileRef2VAPrompt(useMotionStore.getState(), scrubbed!)
+  results.push(check('Live prompt uses edited duration', namedPrompt.includes('10.0-second')))
+  const json = useMotionStore.getState().serialized()
+  results.push(
+    check(
+      'Project JSON keeps edited names and duration',
+      json.shots.find((item) => item.id === namedFirst)?.name === 'Person and Car Test' &&
+        json.shots.find((item) => item.id === namedFirst)?.duration === 10 &&
+        json.shots.find((item) => item.id === namedSecond)?.name === 'Second Pass',
+    ),
+  )
+  const boundDuration = bindSingleShotWorkflow(json, json.shots.find((item) => item.id === namedFirst)!)
+  const durationNode = boundDuration.ok
+    ? boundDuration.editor.nodes?.find((node) => node.type === 'PrimitiveFloat' && node.title === 'Float (Duration)')
+    : undefined
+  results.push(
+    check(
+      'ComfyUI duration widget follows the edited shot',
+      boundDuration.ok && ((durationNode?.widgets_values_named ?? {}) as { value?: number }).value === 10,
+      boundDuration.ok ? String((durationNode?.widgets_values_named as { value?: number } | undefined)?.value) : boundDuration.reason,
+    ),
+  )
+
   return { ok: results.every((item) => item.ok), results }
 }
