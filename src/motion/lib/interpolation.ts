@@ -79,8 +79,14 @@ export function formatTimecode(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${remainder.toFixed(3).padStart(6, '0')}`
 }
 
-/** Official ComfyUI Ref2VA length expression, using 24 fps. */
+/** Python/Comfy `%` for negatives: (-3) % 17 === 14. JavaScript `%` is not the same. */
+export function pythonModulo(value: number, modulus: number) {
+  const m = modulus === 0 ? 1 : modulus
+  return ((value % m) + m) % m
+}
+
+/** Official ComfyUI Ref2VA length expression, using 24 fps and Python modulo. */
 export function h3FrameLength(durationSeconds: number) {
   const raw = Math.max(5, Math.round(durationSeconds * 24))
-  return raw + ((5 - (raw % 17)) % 17)
+  return raw + pythonModulo(5 - (raw % 17), 17)
 }

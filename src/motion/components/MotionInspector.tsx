@@ -7,6 +7,7 @@ import { ASPECT_RATIOS, LENS_PRESETS } from '@/lib/constants'
 import { copyText } from '@/lib/copy'
 import { evaluateCamera } from '@/motion/lib/interpolation'
 import { snapshotProject } from '@/motion/lib/projectSnapshot'
+import { buildSingleShotPackage } from '@/motion/lib/exportPackage'
 import { compileRef2VAPrompt, compileShotCode } from '@/motion/lib/promptCompiler'
 import { manifestForShot, resolveShotTags, validateReferenceLimits } from '@/motion/lib/references'
 import { bindSingleShotWorkflow, compileMasterWorkflow } from '@/motion/lib/workflow'
@@ -372,7 +373,10 @@ function ExportPanel() {
         <Button type="button" size="sm" variant="outline" onClick={() => exportManifest()}>
           Manifest
         </Button>
-        <Button type="button" size="sm" onClick={() => setMessage(exportWorkflow(customWorkflow))}>
+        <Button type="button" size="sm" onClick={() => setMessage(exportPackage(customWorkflow))}>
+          Export package ZIP
+        </Button>
+        <Button type="button" size="sm" variant="outline" onClick={() => setMessage(exportWorkflow(customWorkflow))}>
           ComfyUI workflow
         </Button>
         <Button type="button" size="sm" variant="ghost" onClick={() => setMessage(compileMasterWorkflow().reason)}>
@@ -472,6 +476,21 @@ function exportWorkflow(template: unknown) {
   download(`${shot.id}-minimax-h3-r2v.json`, JSON.stringify(result.editor, null, 2))
   download(`${shot.id}-minimax-h3-r2v.api.json`, JSON.stringify(result.api, null, 2))
   return `Single-shot official Ref2VA graph exported. ${result.diagnostics.join(' ')} Not executed in ComfyUI.`
+}
+
+function exportPackage(template: unknown) {
+  const project = activeProject()
+  const shot = project.shots.find((item) => item.id === project.activeShotId)
+  if (!shot) return 'No active shot.'
+  const packed = buildSingleShotPackage(project, shot, template ?? undefined)
+  if (!packed.ok) return packed.reason
+  const url = URL.createObjectURL(packed.blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${shot.id}-ref2va-package.zip`
+  link.click()
+  URL.revokeObjectURL(url)
+  return `Single-shot package downloaded (${packed.filenames.length} files). Copy media/ into the ComfyUI input folder before queueing. Not executed in ComfyUI.`
 }
 
 async function importProjectFile(file: File) {

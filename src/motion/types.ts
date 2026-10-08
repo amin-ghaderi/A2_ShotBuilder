@@ -174,10 +174,19 @@ export const REF2VA_LIMITS = {
   maxAudios: 3,
   minDuration: 4,
   maxDuration: 15,
+  minClipDuration: 2,
+  maxClipDuration: 15,
+  maxMixedFiles: 12,
   fps: 24,
   minReliableChunk: 4,
   defaultChunk: 10,
 } as const
+
+export const TEMPLATE_EXAMPLE_IMAGES = ['red_superboy_on_city_roof.png', 'mecha_dragon_lightning.png'] as const
+
+export const STANDALONE_PICTURE_ROLES: MotionReferenceRole[] = ['shot', 'camera']
+
+export const APPEARANCE_PICTURE_ROLES: MotionReferenceRole[] = ['identity', 'appearance', 'object', 'environment']
 
 export const H3_FRAME_EXPRESSION = 'max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17'
 

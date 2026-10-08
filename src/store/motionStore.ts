@@ -106,7 +106,7 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
   setDuration: (duration) =>
     set((state) =>
       patchShot(state, (shot) => {
-        const next = clamp(duration, 1, 120)
+        const next = clamp(duration, REF2VA_LIMITS.minDuration, REF2VA_LIMITS.maxDuration)
         return {
           ...shot,
           duration: next,
@@ -331,14 +331,6 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
   addReference: (reference) =>
     set((state) => {
       const item: MotionReference = { ...reference, id: uid('ref') }
-      const counts = {
-        image: state.references.filter((entry) => entry.kind === 'image').length,
-        video: state.references.filter((entry) => entry.kind === 'video').length,
-        audio: state.references.filter((entry) => entry.kind === 'audio').length,
-      }
-      if (item.kind === 'image' && counts.image >= REF2VA_LIMITS.maxImages) return state
-      if (item.kind === 'video' && counts.video >= REF2VA_LIMITS.maxVideos) return state
-      if (item.kind === 'audio' && counts.audio >= REF2VA_LIMITS.maxAudios) return state
       return { references: [...state.references, item] }
     }),
 
@@ -360,16 +352,35 @@ export const useMotionStore = create<MotionStore>((set, get) => ({
   bindReference: (binding) =>
     set((state) => {
       const objectId = binding.objectId ?? (state.selection.kind === 'object' ? state.selection.id : undefined)
-      const next = { ...binding, objectId }
-      return patchShot(state, (shot) => ({
-        ...shot,
-        bindings: [...shot.bindings.filter((item) => item.referenceId !== next.referenceId), next],
-        objects: shot.objects.map((object) =>
-          object.id === objectId
-            ? { ...object, referenceIds: [...new Set([...object.referenceIds, next.referenceId])] }
-            : object,
+      const shot = state.shots.find((item) => item.id === state.activeShotId)
+      const object = objectId ? shot?.objects.find((item) => item.id === objectId) : undefined
+      const subjectId =
+        binding.subjectId ??
+        object?.subjectId ??
+        (object
+          ? state.subjects.find((subject) => subject.kind === object.kind || (object.kind === 'person' && subject.kind === 'person'))?.id
+          : undefined)
+      const next = { ...binding, objectId, subjectId }
+      return {
+        subjects: state.subjects.map((subject) =>
+          subject.id === subjectId
+            ? { ...subject, referenceIds: [...new Set([...subject.referenceIds, next.referenceId])] }
+            : subject,
         ),
-      }))
+        ...patchShot(state, (current) => ({
+          ...current,
+          bindings: [...current.bindings.filter((item) => item.referenceId !== next.referenceId), next],
+          objects: current.objects.map((item) =>
+            item.id === objectId
+              ? {
+                  ...item,
+                  subjectId: subjectId ?? item.subjectId,
+                  referenceIds: [...new Set([...item.referenceIds, next.referenceId])],
+                }
+              : item,
+          ),
+        })),
+      }
     }),
 
   unbindReference: (referenceId) =>
