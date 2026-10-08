@@ -3,6 +3,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import gsap from 'gsap'
 import { Inspector } from '@/components/controls/Inspector'
 import { CanvasBoundary } from '@/components/layout/CanvasBoundary'
+import { Footer } from '@/components/layout/Footer'
+import { WorkspaceNav } from '@/components/layout/WorkspaceNav'
 import { PromptOutput } from '@/components/prompt/PromptOutput'
 import { ShotPreview } from '@/components/preview/ShotPreview'
 import { SceneEditor } from '@/components/scene/SceneEditor'
@@ -55,28 +57,15 @@ export function AppShell() {
   )
 }
 
-function Footer() {
-  return (
-    <footer className="shrink-0 border-t border-line px-4 py-1.5">
-      <p className="text-center text-[10px] leading-relaxed tracking-wide text-faint sm:text-right">
-        A2 ShotBuilder — Designed & Developed by Amin Ghaderi
-        <span className="mx-2 hidden text-white/15 sm:inline" aria-hidden="true">
-          ·
-        </span>
-        <span className="mt-0.5 block sm:mt-0 sm:inline">© 2026 A2 Studio. All rights reserved.</span>
-      </p>
-    </footer>
-  )
-}
-
 function Header() {
   const [copied, setCopied] = useState(false)
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-line px-4">
-      <div className="flex items-baseline gap-3">
-        <span className="text-sm tracking-[0.22em] text-accent">NORTHLIGHT</span>
-        <span className="hidden text-xs text-muted sm:inline">Shot designer</span>
+      <div className="flex items-center gap-3">
+        <span className="text-sm tracking-[0.22em] text-accent">A2</span>
+        <WorkspaceNav />
+        <span className="hidden text-xs text-muted sm:inline">Still</span>
       </div>
       <p className="hidden text-xs text-faint lg:block">Move the scene. The prompt follows.</p>
       <div className="flex items-center gap-2">

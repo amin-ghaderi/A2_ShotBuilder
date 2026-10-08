@@ -1,0 +1,19 @@
+MuseMinimaxDirector
+Copyright (c) 2026 Muse Collective
+
+This directory preserves required attribution for research reuse of
+Muse MiniMax Director (https://github.com/muse-collective-26/MiniMaxH3-Director).
+
+Muse MiniMax Director original code is MIT-licensed. A2 ShotBuilder does not
+embed Muse's Python ComfyUI node or its JavaScript timeline editor. Motion V1
+reimplements a subset of documented timeline, chunking, and reference-numbering
+ideas in TypeScript inside this Vite app.
+
+The MIT license that covers Muse's original code does not apply to MiniMax H3
+model weights. MiniMax H3 is a separate third-party model. See Muse's NOTICE:
+
+  MiniMax H3 Community License Agreement
+  https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+
+A2 ShotBuilder does not download MiniMax weights and does not run MiniMax
+inference. ComfyUI workflow export is a graph-binding step only.
