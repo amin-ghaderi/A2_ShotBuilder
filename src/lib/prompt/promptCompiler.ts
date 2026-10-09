@@ -10,6 +10,7 @@ import {
   lightSentence,
   moodSentence,
   rollSentence,
+  verticalAngleConstraint,
 } from '@/lib/prompt/promptFragments'
 import type { BackgroundState, SceneData } from '@/types/scene'
 
@@ -28,10 +29,12 @@ export function compilePrompt(state: SceneData) {
   const crop = analyzeCrop(state.subject, state.shotCamera)
   const lights = analyzeLights(state.subject, state.lights)
   const roll = rollSentence(state.shotCamera.roll)
+  const cameraLine = [cameraPositionSentence(analysis), roll].filter(Boolean).join(' ')
+  const vertical = verticalAngleConstraint(analysis.elevation)
 
   const paragraphs = [
     IDENTITY,
-    [cameraPositionSentence(analysis), roll].filter(Boolean).join(' '),
+    vertical ? `${cameraLine}\n\n${vertical}` : cameraLine,
     lensSentence(state.shotCamera.focalLength),
     `${bodySentence(state.subject.bodyYaw)} ${gazeSentence(state.subject.gaze, state.subject.headYaw, state.subject.headPitch)}`,
     framingSentence(state, crop),

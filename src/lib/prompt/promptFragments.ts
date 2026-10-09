@@ -3,11 +3,53 @@ import { formatDeg, toDeg } from '@/lib/math'
 import type { CameraAnalysis } from '@/lib/geometry/cameraAnalysis'
 import type { LightAnalysis } from '@/lib/geometry/lightAnalysis'
 
+/** Degrees from eye level. Below this, the shot is treated as approximately eye-level. */
+export const VERTICAL_EYE_LEVEL_DEG = 6
+/** Degrees from eye level. At or beyond this, the shot is a clear low or high angle. */
+export const VERTICAL_CLEAR_ANGLE_DEG = 10
+
+export type VerticalCameraBand = 'eye-level' | 'slight-low' | 'clear-low' | 'slight-high' | 'clear-high'
+
+export function verticalCameraBand(elevation: number): VerticalCameraBand {
+  if (elevation <= -VERTICAL_CLEAR_ANGLE_DEG) return 'clear-low'
+  if (elevation >= VERTICAL_CLEAR_ANGLE_DEG) return 'clear-high'
+  if (elevation <= -VERTICAL_EYE_LEVEL_DEG) return 'slight-low'
+  if (elevation >= VERTICAL_EYE_LEVEL_DEG) return 'slight-high'
+  return 'eye-level'
+}
+
 export function cameraPositionSentence(analysis: CameraAnalysis) {
   const placement = sidePhrase(analysis.azimuth)
   const height = elevationPhrase(analysis.elevation, analysis.lookPitch)
   const distance = distancePhrase(analysis.distance)
   return `Position the camera ${placement}, ${height}, from ${distance}.`
+}
+
+export function verticalAngleConstraint(elevation: number) {
+  const band = verticalCameraBand(elevation)
+  if (band === 'eye-level') return null
+  if (band === 'clear-low') {
+    return [
+      'This must read clearly as a low-angle shot from below.',
+      "The camera is positioned below the subject's eye level and tilted upward toward the subject.",
+      'The final image must visibly read as a shot from below.',
+      'Do not interpret this as an eye-level shot.',
+      'Do not create a high-angle or top-down view.',
+    ].join('\n')
+  }
+  if (band === 'clear-high') {
+    return [
+      'This must read clearly as a high-angle shot from above.',
+      "The camera is positioned above the subject's eye level and angled downward toward the subject.",
+      'The final image must visibly read as a shot from above.',
+      'Do not interpret this as an eye-level shot.',
+      'Do not create a low-angle upward-looking view.',
+    ].join('\n')
+  }
+  if (band === 'slight-low') {
+    return 'The camera sits slightly below eye level with a mild upward look. Keep this as a subtle low viewpoint; do not raise it to a high-angle or top-down shot.'
+  }
+  return 'The camera sits slightly above eye level with a mild downward look. Keep this as a subtle high viewpoint; do not drop it to a low-angle upward-looking shot.'
 }
 
 export function lensSentence(focalLength: number) {
@@ -127,17 +169,20 @@ function sidePhrase(azimuth: number) {
 }
 
 function elevationPhrase(elevation: number, lookPitch: number) {
+  const band = verticalCameraBand(elevation)
   const abs = Math.abs(elevation)
+  if (band === 'eye-level') return 'approximately at eye level, looking toward the subject'
   const height =
-    abs < 6
-      ? 'at approximately natural eye level'
-      : elevation > 0
-        ? `approximately ${formatDeg(abs)} degrees above natural eye level`
-        : `approximately ${formatDeg(abs)} degrees below natural eye level`
-  if (abs < 6 && Math.abs(lookPitch) < 6) return `${height}, looking toward the subject`
-  if (lookPitch > 6) return `${height}, looking upward toward the subject`
-  if (lookPitch < -6) return `${height}, looking downward toward the subject`
-  return height
+    elevation > 0
+      ? `approximately ${formatDeg(abs)} degrees above natural eye level`
+      : `approximately ${formatDeg(abs)} degrees below natural eye level`
+  const look =
+    band === 'clear-low' || band === 'slight-low' || lookPitch > 6
+      ? 'looking upward toward the subject'
+      : band === 'clear-high' || band === 'slight-high' || lookPitch < -6
+        ? 'looking downward toward the subject'
+        : 'looking toward the subject'
+  return `${height}, ${look}`
 }
 
 function distancePhrase(meters: number) {
