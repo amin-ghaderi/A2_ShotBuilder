@@ -18,11 +18,32 @@ export function verticalCameraBand(elevation: number): VerticalCameraBand {
   return 'eye-level'
 }
 
+/** Degrees of |azimuth|. Below this, the camera is treated as frontal — no L/R block. */
+export const LATERAL_FRONT_DEG = 6
+/** Degrees of |azimuth|. At or beyond this, use the full anatomical disambiguation. */
+export const LATERAL_CLEAR_DEG = 15
+
 export function cameraPositionSentence(analysis: CameraAnalysis) {
   const placement = sidePhrase(analysis.azimuth)
   const height = elevationPhrase(analysis.elevation, analysis.lookPitch)
   const distance = distancePhrase(analysis.distance)
-  return `Position the camera ${placement}, ${height}, from ${distance}.`
+  return `Position the camera ${placement}, and ${height}, from ${distance}.`
+}
+
+export function lateralityConstraint(azimuth: number) {
+  const abs = Math.abs(azimuth)
+  if (abs < LATERAL_FRONT_DEG || abs > 155) return null
+  const isRight = azimuth > 0
+  const anatomical = isRight ? 'right' : 'left'
+  const viewer = isRight ? 'left' : 'right'
+  if (abs < LATERAL_CLEAR_DEG) {
+    return `The camera is only slightly toward the subject's anatomical ${anatomical} side. Do not interpret this as the viewer's ${anatomical} or reverse the camera laterality.`
+  }
+  return [
+    `This camera position must reveal more of the subject's ${anatomical} cheek and ${anatomical} side of the face.`,
+    `For a forward-facing subject, the subject's anatomical ${anatomical} appears on the viewer's ${viewer} side of the resulting image.`,
+    'Do not mirror or reverse this left/right camera direction.',
+  ].join(' ')
 }
 
 export function verticalAngleConstraint(elevation: number) {
@@ -158,14 +179,25 @@ export function moodSentence(mood: MoodId) {
   return `${MOOD[mood]} Do not change the camera angle, lens, or lighting positions described above.`
 }
 
+function anatomicalSide(azimuth: number) {
+  return azimuth > 0 ? 'right' : 'left'
+}
+
 function sidePhrase(azimuth: number) {
   const abs = Math.abs(azimuth)
-  if (abs < 8) return 'directly in front of the subject'
-  const side = azimuth > 0 ? "the subject's right" : "the subject's left"
-  if (abs > 155) return `behind the subject`
-  if (abs > 125) return `behind and to ${side}, approximately ${formatDeg(abs)} degrees from the front`
-  if (abs > 75) return `at the subject's ${azimuth > 0 ? 'right' : 'left'} side, approximately ${formatDeg(abs)} degrees from the front`
-  return `approximately ${formatDeg(abs)} degrees to ${side}`
+  if (abs < LATERAL_FRONT_DEG) return 'directly in front of the subject'
+  const side = anatomicalSide(azimuth)
+  if (abs > 155) return 'behind the subject'
+  if (abs > 125) {
+    return `behind and to the subject's anatomical ${side} side, approximately ${formatDeg(abs)} degrees from the front`
+  }
+  if (abs > 75) {
+    return `at the subject's anatomical ${side} side, approximately ${formatDeg(abs)} degrees from the front, beside the subject's ${side} shoulder`
+  }
+  if (abs >= LATERAL_CLEAR_DEG) {
+    return `approximately ${formatDeg(abs)} degrees to the subject's anatomical ${side} side, beside the subject's ${side} shoulder`
+  }
+  return `approximately ${formatDeg(abs)} degrees to the subject's anatomical ${side} side`
 }
 
 function elevationPhrase(elevation: number, lookPitch: number) {
@@ -196,12 +228,15 @@ function distancePhrase(meters: number) {
 
 function lightPlacement(analysis: LightAnalysis) {
   const abs = Math.abs(analysis.horizontalAngle)
+  const sideName = anatomicalSide(analysis.horizontalAngle)
   const side =
-    abs < 10
+    abs < LATERAL_FRONT_DEG
       ? 'in front of the subject'
       : abs > 155
         ? 'behind the subject'
-        : `approximately ${formatDeg(abs)} degrees to the subject's ${analysis.horizontalAngle > 0 ? 'right' : 'left'}`
+        : abs >= LATERAL_CLEAR_DEG
+          ? `approximately ${formatDeg(abs)} degrees on the subject's anatomical ${sideName} side, near the ${sideName} shoulder/${sideName} side of the face`
+          : `approximately ${formatDeg(abs)} degrees on the subject's anatomical ${sideName} side`
   const vertical =
     Math.abs(analysis.verticalAngle) < 8
       ? 'near face level'

@@ -6,6 +6,7 @@ import {
   cameraPositionSentence,
   expressionSentence,
   gazeSentence,
+  lateralityConstraint,
   lensSentence,
   lightSentence,
   moodSentence,
@@ -30,11 +31,13 @@ export function compilePrompt(state: SceneData) {
   const lights = analyzeLights(state.subject, state.lights)
   const roll = rollSentence(state.shotCamera.roll)
   const cameraLine = [cameraPositionSentence(analysis), roll].filter(Boolean).join(' ')
+  const laterality = lateralityConstraint(analysis.azimuth)
   const vertical = verticalAngleConstraint(analysis.elevation)
+  const cameraBlock = [cameraLine, laterality, vertical].filter(Boolean).join('\n\n')
 
   const paragraphs = [
     IDENTITY,
-    vertical ? `${cameraLine}\n\n${vertical}` : cameraLine,
+    cameraBlock,
     lensSentence(state.shotCamera.focalLength),
     `${bodySentence(state.subject.bodyYaw)} ${gazeSentence(state.subject.gaze, state.subject.headYaw, state.subject.headPitch)}`,
     framingSentence(state, crop),
